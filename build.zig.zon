@@ -2,6 +2,10 @@
     .name = .zigui,
     .version = "0.1.0",
     .dependencies = .{
+        .zig_objc = .{
+            .url = "https://github.com/mitchellh/zig-objc/archive/c8de82ff80281215ad92900866dab7103a8efa8b.tar.gz",
+            .hash = "zig_objc-0.0.0-Ir_Sp9gsAQCPAJc0oF5xoWePHWP6Y6tCphDeyNUThJoi",
+        },
         .yoga = .{
             .url = "https://github.com/facebook/yoga/archive/refs/tags/v3.2.1.tar.gz",
             .hash = "N-V-__8AAOYl0gAU76B1VRPFD9AWvy2VkOef2jN0B3sISTeO",

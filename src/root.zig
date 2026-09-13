@@ -14,7 +14,13 @@ pub const Style = layout.Style;
 pub const geometry = @import("geometry.zig");
 pub const scene = @import("scene.zig");
 pub const renderer = @import("renderer.zig");
+pub const platform = @import("platform.zig");
+pub const input = @import("input.zig");
+pub const Platform = platform.Platform;
+pub const PlatformWindow = platform.PlatformWindow;
+pub const NativeWindow = @import("native_window.zig").NativeWindow;
 
 test {
     _ = @import("tests.zig");
+    if (@import("build_options").native_tests) _ = @import("platform/macos.zig");
 }

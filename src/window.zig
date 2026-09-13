@@ -7,7 +7,6 @@ const AnyElement = @import("element.zig").AnyElement;
 pub const Window = WindowWithRenderer(@import("renderer.zig").Renderer);
 
 /// The platform host calls drawIfNeeded after updates or an OS frame request.
-/// No native window or GPU context is created in phase one.
 pub fn WindowWithRenderer(comptime Renderer: type) type {
     return struct {
         const Self = @This();
@@ -23,6 +22,12 @@ pub fn WindowWithRenderer(comptime Renderer: type) type {
         hitboxes: std.ArrayList(frame.Hitbox) = .empty,
 
         pub fn init(app: *reactive.App, root: anytype, size: g.Size, scale: f32) !Self {
+            var renderer = try Renderer.init(app.allocator, size, scale);
+            errdefer renderer.deinit();
+            return initWithRenderer(app, root, size, scale, renderer);
+        }
+        /// Transfers renderer ownership on success only.
+        pub fn initWithRenderer(app: *reactive.App, root: anytype, size: g.Size, scale: f32, renderer: Renderer) !Self {
             _ = try app.read(root);
             try validateSize(size, scale);
             const Adapter = struct {
@@ -30,7 +35,7 @@ pub fn WindowWithRenderer(comptime Renderer: type) type {
                     return f.view(@TypeOf(root){ .app = f.app, .id = id });
                 }
             };
-            return .{ .app = app, .root_id = root.id, .render = Adapter.render, .renderer = try Renderer.init(app.allocator, size, scale), .size = size, .scale = scale };
+            return .{ .app = app, .root_id = root.id, .render = Adapter.render, .renderer = renderer, .size = size, .scale = scale };
         }
         pub fn deinit(self: *Self) void {
             self.hitboxes.deinit(self.app.allocator);
