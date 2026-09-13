@@ -106,6 +106,65 @@ alignment/justification, gap, per-edge point margin/padding, absolute positionin
 display-none, clipping and backgrounds. Coordinates are logical pixels; backend
 scale is separate. `layout.c` exposes the upstream API for advanced custom elements.
 
+### Borders
+
+`Style.border_widths` specifies solid per-edge borders;
+`Style.border_color` supplies their shared color. The same style fields work on
+`Div`, cached-view boundaries and `TextOptions.layout_style`.
+
+```zig
+const panel = try frame.div(.{ .style = .{
+    .width = .{ .px = 100 },
+    .height = .{ .px = 60 },
+    .padding = .all(8),
+    .border_widths = .all(2),
+    .corner_radii = .all(12),
+    .border_color = .{ .r = 0.2, .g = 0.5, .b = 0.8 },
+    .clip = true,
+} });
+// For unequal sides: .border_widths = .{ .left = 3, .bottom = 1 }
+// For individual corners: .corner_radii = .{ .top_left = 12, .bottom_right = 6 }
+```
+
+Yoga receives the border widths as part of border-box layout. The example's
+content width is `100 - 2 - 2 - 8 - 8 = 80` logical pixels. Widths reserve space
+even when `border_color` is absent or transparent. Negative/non-finite widths
+return `InvalidBorderWidth` before the frame is submitted.
+
+Layout and painting share GPUI-style stroke snapping: positive widths round to
+the nearest device pixel, half ties toward zero, with a minimum of one device
+pixel. Zero remains zero. For example, a requested `0.25` logical-pixel border
+becomes `0.5` logical pixels at 2× scale. `Style.borderWidths(scale)` exposes the
+resolved widths, and `contentInsets(scale)` combines them with padding.
+
+Borders paint inside their bounds, over the background and before contents.
+`clip = true` clips contents to the padding box inside the border while retaining
+the ancestor clip for border/background painting. Hit testing still includes the
+element's border box. Cached views retain border output and invalidate it when
+width, color, scale or clipping changes; measured text includes borders in its
+content width, origin and baseline.
+
+`Scene.box` paints a background and border together. Square boxes keep the solid
+quad/strip fast path; rounded boxes retain one `Quad` containing the background,
+border widths/color and four corner radii. `Scene.border` also accepts radii for
+rounded outlines with transparent interiors. Custom elements use these helpers
+with already-snapped logical border widths.
+
+Metal evaluates a GPUI-style signed distance field for the outer rounded edge
+and the border's inner edge. Equal adjacent border widths use a circular inner
+edge; unequal widths use a quarter-ellipse distance approximation. Half-device-
+pixel coverage antialiases both boundaries. Border/background composition happens
+in premultiplied space within one fragment, avoiding overlap seams, transparent
+corner darkening and division by zero. Clipping trims draw geometry without
+changing the original shape coordinates used by the distance calculations.
+
+Radii are logical pixels, scaled for rendering and individually clamped to half
+the smaller box dimension, following GPUI's clamped style-radius convention.
+Negative/non-finite values return `InvalidCornerRadius`. Radius changes affect
+painting and cached-view validity, not Yoga measurements or text baselines.
+These radii round the element's own background and border: descendant clipping
+and hitboxes remain rectangular. A rounded descendant mask is a separate feature.
+
 ### Entities, notify and events
 
 ```zig
@@ -545,3 +604,10 @@ Text tests cover UTF-8 run validation, wrapping, measurement, inherited-style ca
 invalidation, retained line/glyph ownership, failure rollback and atlas packing.
 Native tests cover CoreText fallback, RTL/grapheme indexes, bitmap orientation,
 Retina/color rasterization and Metal atlas eviction while replaying a glyph scene.
+Border tests cover scale snapping, border-box geometry, translucent corner
+coverage, content clipping, cached/ordinary equivalence, text baselines and
+allocation-failure cleanup; native tests also submit bordered scenes to Metal.
+Rounded-border tests exercise per-corner metadata, radius changes through cached
+views and unchanged layout. Native tests read back pixels from the production
+Metal rendering path to check corner cutouts, antialiasing, translucent composition,
+asymmetric inner ellipses, missing/thick sides and clip correctness at 1× and 2×.

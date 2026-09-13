@@ -105,9 +105,9 @@ pub const Div = struct {
         if (self.style.hidden) return old_clip;
         try f.configureNode(self.focus, self.key_context, self.listeners, self.bindings, self.text_input);
         if (self.id) |id| try f.hitbox(id, bounds);
-        if (self.style.clip) f.clip = bounds.intersect(old_clip);
+        if (self.style.clip) f.clip = bounds.inset(try self.style.borderWidths(f.scale)).intersect(old_clip);
         for (self.children) |child| try child.prepaint(f);
-        return f.clip;
+        return old_clip;
     }
     pub fn paint(self: *Div, f: *Frame, bounds: g.Bounds, _: *void, clip: *g.Bounds) !void {
         const inherited = f.text_style;
@@ -117,7 +117,9 @@ pub const Div = struct {
         const old_clip = f.clip;
         defer f.clip = old_clip;
         f.clip = clip.*;
-        if (self.style.background) |color| try f.scene.quad(f.allocator(), .{ .bounds = bounds, .color = color, .clip = clip.* });
+        const borders = try self.style.borderWidths(f.scale);
+        try f.scene.box(f.allocator(), .{ .bounds = bounds, .color = self.style.background orelse .{ .a = 0 }, .clip = clip.*, .corner_radii = self.style.corner_radii, .border_widths = borders, .border_color = self.style.border_color orelse .{ .a = 0 } });
+        if (self.style.clip) f.clip = bounds.inset(borders).intersect(clip.*);
         for (self.children) |child| try child.paint(f);
     }
 };

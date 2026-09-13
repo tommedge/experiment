@@ -602,6 +602,7 @@ test "native windows isolate input, resize, render and survive independent close
     var scene: @import("../scene.zig").Scene = .{};
     defer scene.deinit(t.allocator);
     try scene.quad(t.allocator, .{ .bounds = .{ .size = .{ .width = 100, .height = 100 } }, .clip = .{ .origin = .{ .x = 20, .y = 20 }, .size = .{ .width = 40, .height = 40 } }, .color = .{ .r = 1, .a = 0.5 } });
+    try scene.border(t.allocator, .{ .bounds = .{ .size = .{ .width = 100, .height = 100 } }, .widths = .{ .left = 2, .top = 3, .right = 1, .bottom = 4 }, .color = .{ .g = 1, .a = 0.5 }, .clip = .{ .size = .{ .width = 100, .height = 100 } } });
     try first.draw(&scene);
     try second.draw(&scene);
     try wa.renderer.resize(first.metrics().size, 2);

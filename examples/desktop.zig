@@ -29,7 +29,7 @@ const Counter = struct {
         const palette = try self.palette.read();
         const position = self.cursor orelse ui.geometry.Point{ .x = 24, .y = 24 };
         const label = try f.text(try std.fmt.allocPrint(f.allocator(), "{d}", .{self.value}), .{ .style = .{ .font_size = 20, .font = .{ .family = "Menlo", .weight = .bold } } });
-        const bar = try f.div(.{ .id = 1, .children = &.{label}, .style = .{ .absolute = true, .left = position.x, .top = position.y, .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 40 }, .height = .{ .px = 60 }, .padding = .{ .left = 8, .top = 8 }, .background = if (palette.warm) .{ .r = 0.9, .g = 0.3, .b = 0.1 } else .{ .r = 0.1, .g = 0.5, .b = 0.9 } } });
+        const bar = try f.div(.{ .id = 1, .children = &.{label}, .style = .{ .absolute = true, .left = position.x, .top = position.y, .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 40 }, .height = .{ .px = 60 }, .padding = .{ .left = 8, .top = 8 }, .border_widths = .all(2), .corner_radii = .all(10), .border_color = .{ .r = 1, .g = 1, .b = 1, .a = 0.8 }, .background = if (palette.warm) .{ .r = 0.9, .g = 0.3, .b = 0.1 } else .{ .r = 0.1, .g = 0.5, .b = 0.9 } } });
         return f.div(.{
             .style = .{ .width = .{ .percent = 100 }, .height = .{ .percent = 100 }, .clip = true },
             .children = &.{bar},
@@ -95,9 +95,9 @@ const Workspace = struct {
     typography: ui.Entity(Typography),
     palette: ui.Entity(Palette),
     pub fn render(self: *const Workspace, f: *ui.Frame, cx: *ui.Context(Workspace)) !ui.AnyElement {
-        const sidebar = try f.cachedView(self.sidebar, .{ .style = .{ .absolute = true, .left = 24, .top = 120, .width = .{ .px = 50 }, .height = .{ .px = 40 } } });
+        const sidebar = try f.cachedView(self.sidebar, .{ .style = .{ .absolute = true, .left = 24, .top = 120, .width = .{ .px = 50 }, .height = .{ .px = 40 }, .border_widths = .all(1), .border_color = .{ .r = 0.3, .g = 0.6, .b = 0.8 } } });
         const counter = try f.cachedView(self.counter, .{ .style = .{ .width = .{ .percent = 100 }, .height = .{ .percent = 100 } } });
-        const typography = try f.cachedView(self.typography, .{ .style = .{ .absolute = true, .left = 24, .top = 180, .width = .{ .percent = 80 }, .height = .{ .px = 220 }, .clip = true } });
+        const typography = try f.cachedView(self.typography, .{ .style = .{ .absolute = true, .left = 24, .top = 180, .width = .{ .percent = 80 }, .height = .{ .px = 220 }, .clip = true, .padding = .all(8), .border_widths = .{ .left = 3, .top = 1, .right = 1, .bottom = 1 }, .corner_radii = .{ .top_left = 14, .top_right = 14, .bottom_left = 6, .bottom_right = 6 }, .border_color = .{ .r = 0.2, .g = 0.5, .b = 0.8 } } });
         return f.div(.{
             .children = &.{ sidebar, typography, counter },
             .key_context = "Workspace",

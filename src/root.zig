@@ -48,6 +48,9 @@ test {
     _ = @import("view_tests.zig");
     _ = @import("dispatch_tests.zig");
     _ = @import("text_tests.zig");
+    _ = @import("border_tests.zig");
+    _ = @import("rounded_tests.zig");
+    if (@import("build_options").native_tests) _ = @import("rounded_native_tests.zig");
     if (@import("build_options").native_tests) _ = @import("text_native_tests.zig");
     if (@import("build_options").native_tests) _ = @import("platform/macos.zig");
 }

@@ -8,7 +8,7 @@ pub const Length = union(enum) { auto, px: f32, percent: f32 };
 pub const Direction = enum { row, column, row_reverse, column_reverse };
 pub const Align = enum { start, center, end, stretch, baseline };
 pub const Justify = enum { start, center, end, space_between, space_around, space_evenly };
-pub const Edges = struct { left: f32 = 0, top: f32 = 0, right: f32 = 0, bottom: f32 = 0 };
+pub const Edges = g.Edges;
 pub const Style = struct {
     width: Length = .auto,
     height: Length = .auto,
@@ -32,12 +32,25 @@ pub const Style = struct {
     hidden: bool = false,
     clip: bool = false,
     background: ?g.Color = null,
+    /// Border widths participate in Yoga's border-box layout even without a color.
+    border_widths: Edges = .{},
+    border_color: ?g.Color = null,
+    /// Paint-only radii; the rectangular border-box measurements do not change.
+    corner_radii: g.Corners = .{},
+
+    pub fn borderWidths(self: Style, scale: f32) !Edges {
+        return self.border_widths.snapped(scale);
+    }
+    pub fn contentInsets(self: Style, scale: f32) !Edges {
+        return self.padding.add(try self.borderWidths(scale));
+    }
 };
 
 /// Owns all Yoga nodes for one frame, including partially constructed trees.
 pub const Layout = struct {
     allocator: std.mem.Allocator,
     config: *c.YGConfig,
+    scale: f32,
     nodes: std.ArrayList(LayoutId) = .empty,
     /// Scoped origin for detached cached-subtree layouts.
     offset: g.Point = .{},
@@ -49,7 +62,7 @@ pub const Layout = struct {
         const config = c.YGConfigNew() orelse return error.OutOfMemory;
         c.YGConfigSetUseWebDefaults(config, true);
         c.YGConfigSetPointScaleFactor(config, scale);
-        return .{ .allocator = allocator, .config = config };
+        return .{ .allocator = allocator, .config = config, .scale = scale };
     }
 
     pub fn deinit(self: *Layout) void {
@@ -60,10 +73,12 @@ pub const Layout = struct {
     }
 
     pub fn request(self: *Layout, style: Style, children: []const LayoutId) !LayoutId {
+        try style.corner_radii.validate();
+        const borders = try style.borderWidths(self.scale);
         const node = c.YGNodeNewWithConfig(self.config) orelse return error.OutOfMemory;
         errdefer c.YGNodeFree(node);
         try self.nodes.append(self.allocator, node);
-        apply(node, style);
+        apply(node, style, borders);
         for (children, 0..) |child, i| c.YGNodeInsertChild(node, child, @intCast(i));
         return node;
     }
@@ -91,7 +106,7 @@ fn dimension(node: LayoutId, comptime name: []const u8, value: Length) void {
     }
 }
 
-fn apply(node: LayoutId, s: Style) void {
+fn apply(node: LayoutId, s: Style, borders: Edges) void {
     dimension(node, "Width", s.width);
     dimension(node, "Height", s.height);
     dimension(node, "FlexBasis", s.basis);
@@ -127,6 +142,7 @@ fn apply(node: LayoutId, s: Style) void {
     inline for (.{ "left", "top", "right", "bottom" }, .{ c.YGEdgeLeft, c.YGEdgeTop, c.YGEdgeRight, c.YGEdgeBottom }) |name, edge| {
         c.YGNodeStyleSetPadding(node, edge, @field(s.padding, name));
         c.YGNodeStyleSetMargin(node, edge, @field(s.margin, name));
+        c.YGNodeStyleSetBorder(node, edge, @field(borders, name));
     }
     c.YGNodeStyleSetPositionType(node, if (s.absolute) c.YGPositionTypeAbsolute else c.YGPositionTypeRelative);
     if (s.left) |v| c.YGNodeStyleSetPosition(node, c.YGEdgeLeft, v);

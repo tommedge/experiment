@@ -54,7 +54,7 @@ pub const Text = struct {
         }
         try system.validateRuns(self.value, fonts.items);
         const measurement = try f.allocator().create(Measurement);
-        measurement.* = .{ .frame = f, .service = service, .text = self.value, .fonts = fonts.items, .style = style, .wrap = self.options.wrap, .padding = self.options.layout_style.padding };
+        measurement.* = .{ .frame = f, .service = service, .text = self.value, .fonts = fonts.items, .style = style, .wrap = self.options.wrap, .insets = try self.options.layout_style.contentInsets(f.scale) };
         const id = try f.layout.request(self.options.layout_style, &.{});
         layout.c.YGNodeSetContext(id, measurement);
         layout.c.YGNodeSetMeasureFunc(id, Measurement.measure);
@@ -64,13 +64,14 @@ pub const Text = struct {
     pub fn prepaint(self: *Text, f: *Frame, bounds: g.Bounds, measurement: *RequestLayoutState) !PrepaintState {
         const measured = measurement.* orelse return null;
         if (self.options.id) |id| try f.hitbox(id, bounds);
-        return try measured.resolve(if (self.options.wrap) @max(0, bounds.size.width - measured.padding.left - measured.padding.right) else null);
+        return try measured.resolve(if (self.options.wrap) @max(0, bounds.size.width - measured.insets.left - measured.insets.right) else null);
     }
     pub fn paint(self: *Text, f: *Frame, bounds: g.Bounds, measurement: *RequestLayoutState, shaped: *PrepaintState) !void {
         const measured = measurement.* orelse return;
         const text_layout = shaped.* orelse return;
-        const clip = if (self.options.layout_style.clip) f.clip.intersect(bounds) else f.clip;
-        if (self.options.layout_style.background) |color| try f.scene.quad(f.allocator(), .{ .bounds = bounds, .clip = clip, .color = color });
+        const borders = try self.options.layout_style.borderWidths(f.scale);
+        try f.scene.box(f.allocator(), .{ .bounds = bounds, .color = self.options.layout_style.background orelse .{ .a = 0 }, .clip = f.clip, .corner_radii = self.options.layout_style.corner_radii, .border_widths = borders, .border_color = self.options.layout_style.border_color orelse .{ .a = 0 } });
+        const clip = if (self.options.layout_style.clip) bounds.inset(borders).intersect(f.clip) else f.clip;
         for (text_layout.lines.items) |line| for (line.layout.runs) |run| for (run.glyphs) |glyph| {
             var color = measured.style.color;
             var start: usize = 0;
@@ -81,7 +82,7 @@ pub const Text = struct {
                 }
                 start += text_run.len;
             }
-            try f.scene.glyph(f.allocator(), .{ .system = measured.service, .font_id = run.font_id, .glyph_id = glyph.id, .font_size = measured.style.font_size, .position = .{ .x = bounds.origin.x + measured.padding.left + glyph.position.x, .y = bounds.origin.y + measured.padding.top + line.baseline + glyph.position.y }, .color = color, .clip = clip });
+            try f.scene.glyph(f.allocator(), .{ .system = measured.service, .font_id = run.font_id, .glyph_id = glyph.id, .font_size = measured.style.font_size, .position = .{ .x = bounds.origin.x + measured.insets.left + glyph.position.x, .y = bounds.origin.y + measured.insets.top + line.baseline + glyph.position.y }, .color = color, .clip = clip });
         };
     }
 };
@@ -95,7 +96,7 @@ const Measurement = struct {
     fonts: []const system.FontRun,
     style: system.TextStyle,
     wrap: bool,
-    padding: layout.Edges,
+    insets: layout.Edges,
     last_width: ?f32 = null,
     last_layout: ?*system.TextLayout = null,
     fn resolve(self: *Measurement, width: ?f32) !*system.TextLayout {
@@ -121,11 +122,11 @@ const Measurement = struct {
     }
     fn baseline(node: layout.c.YGNodeConstRef, width: f32, _: f32) callconv(.c) f32 {
         const self = fromNode(node);
-        const result = self.resolve(if (self.wrap) @max(0, width - self.padding.left - self.padding.right) else null) catch |err| {
+        const result = self.resolve(if (self.wrap) @max(0, width - self.insets.left - self.insets.right) else null) catch |err| {
             self.frame.layout.measure_error = err;
             return 0;
         };
-        return self.padding.top + result.lines.items[0].baseline;
+        return self.insets.top + result.lines.items[0].baseline;
     }
     fn constrain(value: f32, available: f32, mode: layout.c.YGMeasureMode) f32 {
         return switch (mode) {

@@ -68,10 +68,10 @@ const ViewElement = struct {
             return old_clip;
         };
         if (style.hidden) return old_clip;
-        if (style.clip) f.clip = bounds.intersect(f.clip);
+        if (style.clip) f.clip = bounds.inset(try style.borderWidths(f.scale)).intersect(f.clip);
         var text_style = f.text_style;
         text_style.font.family = try f.snapshot.memory().dupe(u8, text_style.font.family);
-        const key = state.CacheKey{ .bounds = bounds, .clip = f.clip, .viewport = f.size, .scale = f.scale, .style = style, .text_style = text_style };
+        const key = state.CacheKey{ .bounds = bounds, .clip = old_clip, .viewport = f.size, .scale = f.scale, .style = style, .text_style = text_style };
         const view = f.snapshot.views.items[self.view_id];
         const node_start = f.snapshot.tree.nodes.items.len;
         const hit_start = f.hitboxes.items.len;
@@ -92,25 +92,23 @@ const ViewElement = struct {
             child.* = try self.renderContents(f);
             const old_phase = f.phase;
             defer f.phase = old_phase;
-            const content = g.Bounds{ .origin = .{ .x = bounds.origin.x + style.padding.left, .y = bounds.origin.y + style.padding.top }, .size = .{
-                .width = @max(0, bounds.size.width - style.padding.left - style.padding.right),
-                .height = @max(0, bounds.size.height - style.padding.top - style.padding.bottom),
-            } };
-            self.local_origin = content.origin;
+            self.local_origin = bounds.origin;
             f.phase = .request_layout;
             const id = try child.*.?.requestLayout(f);
             // A detached containing node reproduces the boundary's flex rules:
             // the rendered root is still a child and must shrink/align normally.
             const container = try f.layout.request(.{
-                .width = .{ .px = content.size.width },
-                .height = .{ .px = content.size.height },
+                .width = .{ .px = bounds.size.width },
+                .height = .{ .px = bounds.size.height },
+                .padding = style.padding,
+                .border_widths = style.border_widths,
                 .direction = style.direction,
                 .align_items = style.align_items,
                 .justify = style.justify,
                 .wrap = style.wrap,
             }, &.{id});
             f.phase = .compute_layout;
-            f.layout.compute(container, content.size);
+            f.layout.compute(container, bounds.size);
             if (f.layout.measure_error) |err| return err;
             f.phase = .prepaint;
             const offset = f.layout.offset;
@@ -124,7 +122,7 @@ const ViewElement = struct {
             .hitboxes = .{ .start = hit_start, .end = f.hitboxes.items.len },
             .scene = .{ .start = 0, .end = 0 },
         };
-        return f.clip;
+        return old_clip;
     }
     pub fn paint(self: *ViewElement, f: *Frame, bounds: g.Bounds, child: *RequestLayoutState, clip: *g.Bounds) !void {
         const old_view = f.active_view;
@@ -142,7 +140,9 @@ const ViewElement = struct {
         if (self.old_cache) |cache| {
             try f.reusePaint(self.view_id, cache);
         } else {
-            if (style.background) |color| try f.scene.quad(f.allocator(), .{ .bounds = bounds, .clip = clip.*, .color = color });
+            const borders = try style.borderWidths(f.scale);
+            try f.scene.box(f.allocator(), .{ .bounds = bounds, .color = style.background orelse .{ .a = 0 }, .clip = clip.*, .corner_radii = style.corner_radii, .border_widths = borders, .border_color = style.border_color orelse .{ .a = 0 } });
+            if (style.clip) f.clip = bounds.inset(borders).intersect(clip.*);
             const offset = f.layout.offset;
             f.layout.offset = self.local_origin;
             defer f.layout.offset = offset;
