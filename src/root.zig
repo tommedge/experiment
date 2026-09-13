@@ -50,6 +50,8 @@ test {
     _ = @import("text_tests.zig");
     _ = @import("border_tests.zig");
     _ = @import("rounded_tests.zig");
+    _ = @import("transparency_tests.zig");
+    if (@import("build_options").native_tests) _ = @import("transparency_native_tests.zig");
     if (@import("build_options").native_tests) _ = @import("rounded_native_tests.zig");
     if (@import("build_options").native_tests) _ = @import("text_native_tests.zig");
     if (@import("build_options").native_tests) _ = @import("platform/macos.zig");

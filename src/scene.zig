@@ -9,6 +9,11 @@ pub const Quad = struct {
     corner_radii: g.Corners = .{},
     border_widths: g.Edges = .{},
     border_color: g.Color = .{ .a = 0 },
+    /// Invisible fills can still have visible outlines. Hitboxes are independent
+    /// of scene primitives, so omitting an invisible quad does not disable input.
+    pub fn isTransparent(self: Quad) bool {
+        return self.color.a == 0 and (self.border_color.a == 0 or std.meta.eql(self.border_widths, g.Edges{}));
+    }
 };
 /// Border inside a box, with already-snapped logical widths. Square borders use
 /// non-overlapping strips; rounded borders become one transparent-fill analytic quad.
@@ -45,6 +50,7 @@ pub const Scene = struct {
     pub fn quad(self: *Scene, allocator: std.mem.Allocator, value: Quad) !void {
         try value.corner_radii.validate();
         try value.border_widths.validateBorder();
+        if (value.isTransparent()) return;
         var normalized = value;
         normalized.corner_radii = value.corner_radii.clamped(value.bounds.size);
         try self.primitives.append(allocator, .{ .quad = normalized });

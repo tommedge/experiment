@@ -55,21 +55,25 @@ float4 rounded_box(Vertex in) {
         }
         border_coverage = saturate(0.5 - inner);
     }
-    // Compose in premultiplied space, then return straight RGB for our blend
-    // pipeline. This also handles transparent fills without dark seams or 0/0.
+    // Compose and return premultiplied RGBA. Keeping coverage in RGB as well as
+    // alpha avoids dividing by tiny/zero alpha along transparent rounded edges.
     float border_alpha = in.border_color.a * border_coverage;
     float alpha = border_alpha + in.color.a * (1 - border_alpha);
     float3 premultiplied = in.border_color.rgb * border_alpha + in.color.rgb * in.color.a * (1 - border_alpha);
-    return float4(alpha > 0 ? premultiplied / alpha : float3(0), alpha * outer_coverage);
+    return float4(premultiplied * outer_coverage, alpha * outer_coverage);
 }
 fragment float4 quad_fragment(Vertex in [[stage_in]], texture2d<float> atlas [[texture(0)]], sampler filtering [[sampler(0)]]) {
-    if (in.mode == 0) return in.color;
+    if (in.mode == 0) return float4(in.color.rgb * in.color.a, in.color.a);
     if (in.mode == 3) return rounded_box(in);
     float4 sample = atlas.sample(filtering, in.uv);
-    if (in.mode == 1) return float4(in.color.rgb, in.color.a * sample.r);
+    if (in.mode == 1) {
+        float alpha = in.color.a * sample.r;
+        return float4(in.color.rgb * alpha, alpha);
+    }
     // CoreGraphics color glyphs contain premultiplied sRGB. Interpolate in that
     // representation, unpremultiply, then decode for the linear blend pipeline.
     float3 rgb = sample.a > 0 ? sample.rgb / sample.a : float3(0);
     rgb = select(pow((rgb + 0.055) / 1.055, float3(2.4)), rgb / 12.92, rgb <= 0.04045);
-    return float4(rgb, sample.a * in.color.a);
+    float alpha = sample.a * in.color.a;
+    return float4(rgb * alpha, alpha);
 }

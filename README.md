@@ -106,6 +106,37 @@ alignment/justification, gap, per-edge point margin/padding, absolute positionin
 display-none, clipping and backgrounds. Coordinates are logical pixels; backend
 scale is separate. `layout.c` exposes the upstream API for advanced custom elements.
 
+### Transparent quads
+
+Set the background color's alpha to draw a translucent quad over earlier scene
+content. Colors supplied by application code are straight, linear RGBA:
+
+```zig
+const overlay = try frame.div(.{ .style = .{
+    .width = .{ .px = 160 },
+    .height = .{ .px = 80 },
+    .background = .{ .r = 0.1, .g = 0.5, .b = 0.9, .a = 0.4 },
+    .corner_radii = .all(12),
+} });
+// Fully transparent: .background = ui.geometry.Color.transparent
+```
+
+Alpha `0` is invisible, `1` is opaque, and intermediate values reveal content
+behind the quad, including the renderer's clear color. Borders have their own
+alpha, so a transparent fill can retain a visible outline. Background alpha
+applies to that fill; child text and other child primitives use their own colors.
+
+All Metal shader paths emit premultiplied linear RGBA and use source-over blending
+(`One`, `OneMinusSourceAlpha`) for both RGB and alpha. Rounded-edge coverage,
+glyph coverage and color-glyph opacity use the same convention. Rendering keeps
+scene order across atlas batches, so overlapping translucent quads and text
+compose correctly. Cached scenes retain the original straight-alpha colors.
+
+Fully transparent quads without visible borders are skipped. Layout and registered
+hitboxes remain independent of alpha, including when a cached view becomes
+invisible. In the desktop demo, move the translucent counter quad across the
+typography sample to see the text through its fill.
+
 ### Borders
 
 `Style.border_widths` specifies solid per-edge borders;
@@ -557,7 +588,7 @@ no pointers into frame memory may escape. A GPU implementation can copy into
 backend-owned in-flight buffers and manage fences internally. Failed submission
 must preserve its last successful presentation. The platform adapter owns native
 window/surface creation. Metal uploads per-frame solid/glyph instances, clips them
-in logical coordinates, preserves scene order, uses source-alpha blending
+in logical coordinates, preserves scene order, uses premultiplied source-over blending
 and an sRGB drawable for the scene's linear colors. It waits for GPU completion
 before presentation, bounding resource lifetime and checking submission errors.
 This intentionally simple backend is synchronous rather than a pipelined renderer.
@@ -627,3 +658,6 @@ asymmetric inner ellipses, missing/thick sides and clip correctness at 1× and 2
 Native resize tests additionally verify immediate size notification, matching
 drawable dimensions, transactional display, reentrant-request deferral, failure
 cleanup and ignored display callbacks after window close.
+Transparency tests verify zero-alpha elision and cached hitbox preservation;
+GPU readback checks overlapping fills on transparent/opaque targets, reversed
+draw order, clipping, and interleaved coverage/color glyphs with translucent quads.

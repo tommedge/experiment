@@ -90,5 +90,12 @@ pub const Bounds = struct {
         } };
     }
 };
-/// Linear RGBA, each channel in 0...1.
-pub const Color = struct { r: f32 = 0, g: f32 = 0, b: f32 = 0, a: f32 = 1 };
+/// Straight (unpremultiplied) linear RGBA, each channel in 0...1. Alpha controls
+/// source-over transparency; the renderer premultiplies RGB before blending.
+pub const Color = struct {
+    r: f32 = 0,
+    g: f32 = 0,
+    b: f32 = 0,
+    a: f32 = 1,
+    pub const transparent: Color = .{ .a = 0 };
+};

@@ -29,7 +29,7 @@ const Counter = struct {
         const palette = try self.palette.read();
         const position = self.cursor orelse ui.geometry.Point{ .x = 24, .y = 24 };
         const label = try f.text(try std.fmt.allocPrint(f.allocator(), "{d}", .{self.value}), .{ .style = .{ .font_size = 20, .font = .{ .family = "Menlo", .weight = .bold } } });
-        const bar = try f.div(.{ .id = 1, .children = &.{label}, .style = .{ .absolute = true, .left = position.x, .top = position.y, .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 40 }, .height = .{ .px = 60 }, .padding = .{ .left = 8, .top = 8 }, .border_widths = .all(2), .corner_radii = .all(10), .border_color = .{ .r = 1, .g = 1, .b = 1, .a = 0.8 }, .background = if (palette.warm) .{ .r = 0.9, .g = 0.3, .b = 0.1 } else .{ .r = 0.1, .g = 0.5, .b = 0.9 } } });
+        const bar = try f.div(.{ .id = 1, .children = &.{label}, .style = .{ .absolute = true, .left = position.x, .top = position.y, .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 40 }, .height = .{ .px = 60 }, .padding = .{ .left = 8, .top = 8 }, .border_widths = .all(2), .corner_radii = .all(10), .border_color = .{ .r = 1, .g = 1, .b = 1, .a = 0.8 }, .background = if (palette.warm) .{ .r = 0.9, .g = 0.3, .b = 0.1, .a = 0.55 } else .{ .r = 0.1, .g = 0.5, .b = 0.9, .a = 0.55 } } });
         return f.div(.{
             .style = .{ .width = .{ .percent = 100 }, .height = .{ .percent = 100 }, .clip = true },
             .children = &.{bar},

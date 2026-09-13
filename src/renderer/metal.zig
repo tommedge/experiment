@@ -70,7 +70,9 @@ pub const Metal = struct {
         const attachment = descriptor.msgSend(objc.Object, "colorAttachments", .{}).msgSend(objc.Object, "objectAtIndexedSubscript:", .{@as(usize, 0)});
         attachment.msgSend(void, "setPixelFormat:", .{@as(usize, 81)}); // BGRA8Unorm_sRGB
         attachment.msgSend(void, "setBlendingEnabled:", .{true});
-        attachment.msgSend(void, "setSourceRGBBlendFactor:", .{@as(usize, 4)}); // source alpha
+        // Every shader path emits premultiplied linear RGBA. Source-over keeps
+        // RGB and alpha consistent, including partially covered transparent edges.
+        attachment.msgSend(void, "setSourceRGBBlendFactor:", .{@as(usize, 1)}); // one
         attachment.msgSend(void, "setDestinationRGBBlendFactor:", .{@as(usize, 5)});
         attachment.msgSend(void, "setSourceAlphaBlendFactor:", .{@as(usize, 1)});
         attachment.msgSend(void, "setDestinationAlphaBlendFactor:", .{@as(usize, 5)});
@@ -158,6 +160,7 @@ pub const Metal = struct {
         defer batches.deinit(self.allocator);
         for (scene.primitives.items) |primitive| switch (primitive) {
             .quad => |q| {
+                if (q.isTransparent()) continue;
                 const bounds = q.bounds.intersect(q.clip).intersect(.{ .size = self.size });
                 if (bounds.size.width <= 0 or bounds.size.height <= 0) continue;
                 const radii = q.corner_radii.clamped(q.bounds.size);
