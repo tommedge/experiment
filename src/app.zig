@@ -136,10 +136,22 @@ pub const App = struct {
     /// erased context is borrowed only while the frame's traversal is active.
     view_tracking: ?struct { context: *anyopaque, record: *const fn (*anyopaque, Dependency) anyerror!void } = null,
     next_focus: u64 = 1,
+    text_system: ?*@import("text_system.zig").TextSystem = null,
+    text_revision: u64 = 0,
     wakeup: ?Wakeup = null,
 
     pub fn init(allocator: Allocator) App {
         return .{ .allocator = allocator };
+    }
+    /// Retains a generic text service. Existing scenes retain their original
+    /// service until released; replacing this selection invalidates window caches.
+    pub fn setTextSystem(self: *App, system: *@import("text_system.zig").TextSystem) void {
+        if (self.text_system == system) return;
+        _ = system.retain();
+        if (self.text_system) |old| old.release();
+        self.text_system = system;
+        self.text_revision += 1;
+        self.schedule();
     }
     pub fn newFocusHandle(self: *App) @import("dispatch.zig").FocusHandle {
         const id = self.next_focus;
@@ -147,6 +159,7 @@ pub const App = struct {
         return .{ .app = self, .id = id };
     }
     pub fn deinit(self: *App) void {
+        defer if (self.text_system) |system| system.release();
         for (self.listeners.items) |entry| entry.destroy(self.allocator, entry.capture);
         for (self.effects.items) |effect| if (effect.destroy) |destroy_payload| destroy_payload(self.allocator, effect.payload.?);
         for (self.slots.items) |slot| if (slot.value) |value| slot.destroy(self.allocator, value);

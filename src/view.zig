@@ -1,4 +1,3 @@
-const std = @import("std");
 const reactive = @import("app.zig");
 const elements = @import("element.zig");
 const Frame = @import("frame.zig").Frame;
@@ -70,14 +69,16 @@ const ViewElement = struct {
         };
         if (style.hidden) return old_clip;
         if (style.clip) f.clip = bounds.intersect(f.clip);
-        const key = state.CacheKey{ .bounds = bounds, .clip = f.clip, .viewport = f.size, .scale = f.scale, .style = style };
+        var text_style = f.text_style;
+        text_style.font.family = try f.snapshot.memory().dupe(u8, text_style.font.family);
+        const key = state.CacheKey{ .bounds = bounds, .clip = f.clip, .viewport = f.size, .scale = f.scale, .style = style, .text_style = text_style };
         const view = f.snapshot.views.items[self.view_id];
         const node_start = f.snapshot.tree.nodes.items.len;
         const hit_start = f.hitboxes.items.len;
         if (view.previous) |previous| {
             if (view.dirty_reason == .clean) {
                 if (f.previous.?.views.items[previous].cache) |cache| {
-                    if (std.meta.eql(key, cache.key)) {
+                    if (key.eql(cache.key)) {
                         self.old_cache = cache;
                         try f.reusePrepaint(self.view_id, cache);
                     } else {
@@ -110,6 +111,7 @@ const ViewElement = struct {
             }, &.{id});
             f.phase = .compute_layout;
             f.layout.compute(container, content.size);
+            if (f.layout.measure_error) |err| return err;
             f.phase = .prepaint;
             const offset = f.layout.offset;
             f.layout.offset = self.local_origin;

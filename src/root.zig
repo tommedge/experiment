@@ -25,10 +25,29 @@ pub const DispatchPhase = dispatch.Phase;
 pub const EventContext = dispatch.EventContext;
 pub const CachedViewOptions = @import("view.zig").CachedViewOptions;
 pub const view_state = @import("view_state.zig");
+pub const text = @import("text_system.zig");
+pub const TextSystem = text.TextSystem;
+pub const PlatformTextSystem = text.PlatformTextSystem;
+pub const Text = @import("text.zig").Text;
+pub const TextOptions = @import("text.zig").Options;
+pub const TextStyle = text.TextStyle;
+pub const TextRun = text.TextRun;
+pub const Font = text.Font;
+pub const FontId = text.FontId;
+pub const GlyphId = text.GlyphId;
+pub const FontMetrics = text.FontMetrics;
+pub const FontRun = text.FontRun;
+pub const LineLayout = text.LineLayout;
+pub const ShapedRun = text.ShapedRun;
+pub const ShapedGlyph = text.ShapedGlyph;
+pub const RenderGlyphParams = text.RenderGlyphParams;
+pub const TextStyleRefinement = text.TextStyleRefinement;
 
 test {
     _ = @import("tests.zig");
     _ = @import("view_tests.zig");
     _ = @import("dispatch_tests.zig");
+    _ = @import("text_tests.zig");
+    if (@import("build_options").native_tests) _ = @import("text_native_tests.zig");
     if (@import("build_options").native_tests) _ = @import("platform/macos.zig");
 }

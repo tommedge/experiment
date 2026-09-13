@@ -28,7 +28,8 @@ const Counter = struct {
         self.stats.counter += 1;
         const palette = try self.palette.read();
         const position = self.cursor orelse ui.geometry.Point{ .x = 24, .y = 24 };
-        const bar = try f.div(.{ .id = 1, .style = .{ .absolute = true, .left = position.x, .top = position.y, .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 40 }, .height = .{ .px = 60 }, .background = if (palette.warm) .{ .r = 0.9, .g = 0.3, .b = 0.1 } else .{ .r = 0.1, .g = 0.5, .b = 0.9 } } });
+        const label = try f.text(try std.fmt.allocPrint(f.allocator(), "{d}", .{self.value}), .{ .style = .{ .font_size = 20, .font = .{ .family = "Menlo", .weight = .bold } } });
+        const bar = try f.div(.{ .id = 1, .children = &.{label}, .style = .{ .absolute = true, .left = position.x, .top = position.y, .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 40 }, .height = .{ .px = 60 }, .padding = .{ .left = 8, .top = 8 }, .background = if (palette.warm) .{ .r = 0.9, .g = 0.3, .b = 0.1 } else .{ .r = 0.1, .g = 0.5, .b = 0.9 } } });
         return f.div(.{
             .style = .{ .width = .{ .percent = 100 }, .height = .{ .percent = 100 }, .clip = true },
             .children = &.{bar},
@@ -71,7 +72,19 @@ const Sidebar = struct {
     pub fn render(self: *const Sidebar, f: *ui.Frame, _: *ui.Context(Sidebar)) !ui.AnyElement {
         self.stats.sidebar += 1;
         const palette = try self.palette.read();
-        return f.div(.{ .id = 2, .style = .{ .width = .{ .percent = 100 }, .height = .{ .percent = 100 }, .background = if (palette.warm) .{ .r = 0.3, .g = 0.08, .b = 0.02 } else .{ .r = 0.02, .g = 0.15, .b = 0.3 } } });
+        return f.div(.{ .id = 2, .children = &.{try f.text("idle", .{})}, .style = .{ .width = .{ .percent = 100 }, .height = .{ .percent = 100 }, .justify = .center, .align_items = .center, .background = if (palette.warm) .{ .r = 0.3, .g = 0.08, .b = 0.02 } else .{ .r = 0.02, .g = 0.15, .b = 0.3 } } });
+    }
+};
+/// Cached typography sample exercising styled runs, wrapping, fallback fonts,
+/// combining marks, RTL shaping and color glyphs through the same text interface.
+const Typography = struct {
+    pub fn render(_: *const Typography, f: *ui.Frame, _: *ui.Context(Typography)) !ui.AnyElement {
+        const title = "CoreText → Metal\n";
+        const sample = "café · e\u{301} · 👩‍💻 · 你好\nשלום · العربية\nResize to wrap this text. Space grows the quad; T changes the shared palette.";
+        return f.text(title ++ sample, .{ .wrap = true, .style = .{ .font = .{ .family = "Helvetica" }, .font_size = 22, .line_height = 30 }, .runs = &.{
+            .{ .len = title.len, .font = .{ .family = "Helvetica", .weight = .bold }, .color = .{ .r = 0.2, .g = 0.7, .b = 1 } },
+            .{ .len = sample.len },
+        } });
     }
 };
 /// Uncached parent that arranges the two cache boundaries and handles the shared
@@ -79,12 +92,14 @@ const Sidebar = struct {
 const Workspace = struct {
     counter: ui.Entity(Counter),
     sidebar: ui.Entity(Sidebar),
+    typography: ui.Entity(Typography),
     palette: ui.Entity(Palette),
     pub fn render(self: *const Workspace, f: *ui.Frame, cx: *ui.Context(Workspace)) !ui.AnyElement {
         const sidebar = try f.cachedView(self.sidebar, .{ .style = .{ .absolute = true, .left = 24, .top = 120, .width = .{ .px = 50 }, .height = .{ .px = 40 } } });
         const counter = try f.cachedView(self.counter, .{ .style = .{ .width = .{ .percent = 100 }, .height = .{ .percent = 100 } } });
+        const typography = try f.cachedView(self.typography, .{ .style = .{ .absolute = true, .left = 24, .top = 180, .width = .{ .percent = 80 }, .height = .{ .px = 220 }, .clip = true } });
         return f.div(.{
-            .children = &.{ sidebar, counter },
+            .children = &.{ sidebar, typography, counter },
             .key_context = "Workspace",
             .listeners = &.{try f.entityActionListener(cx.entity, TogglePalette, toggle)},
             .bindings = &.{try f.bindKey("t", .{}, "Workspace", TogglePalette{})},
@@ -133,7 +148,8 @@ pub fn main(init: std.process.Init) !void {
     const focus = app.newFocusHandle();
     const counter = try app.create(Counter{ .palette = palette, .focus = focus, .stats = &stats });
     const sidebar = try app.create(Sidebar{ .palette = palette, .stats = &stats });
-    const root = try app.create(Workspace{ .counter = counter, .sidebar = sidebar, .palette = palette });
+    const typography = try app.create(Typography{});
+    const root = try app.create(Workspace{ .counter = counter, .sidebar = sidebar, .palette = palette, .typography = typography });
     try counter.update(Counter.trackCursor);
     const window = try ui.NativeWindow.create(&app, platform, root, .{ .title = "zigui — move pointer; Space increments; T changes both colors" });
     defer window.destroy();
@@ -155,7 +171,12 @@ pub fn main(init: std.process.Init) !void {
         _ = try window.content.dispatchAction(TogglePalette{});
         _ = try window.content.drawIfNeeded();
         std.debug.assert(stats.sidebar == previous.sidebar + 1);
-        std.debug.print("Metal/cache smoke passed: cursor quad followed pointer, sidebar reused, focused action and shared palette updated\n", .{});
+        var glyphs: usize = 0;
+        for (window.content.inspect().?.scene) |primitive| if (primitive == .glyph) {
+            glyphs += 1;
+        };
+        std.debug.assert(glyphs > 30);
+        std.debug.print("Metal/text/cache smoke passed: {d} glyphs, cursor quad, cached sidebar, focused action and shared palette\n", .{glyphs});
         return;
     }
     platform.run();

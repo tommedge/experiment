@@ -24,13 +24,20 @@ pub const Frame = struct {
     active_view: ?usize = null,
     active_node: ?dispatch.NodeId = null,
     focused: ?u64 = null,
+    text_style: @import("text_system.zig").TextStyle = .{},
+    /// Freeze and retain the text environment for the duration of this frame.
+    text_system: ?*@import("text_system.zig").TextSystem = null,
+    text_layouts: std.ArrayList(*@import("text_system.zig").TextLayout) = .empty,
 
     pub fn init(app: *reactive.App, size: g.Size, scale: f32) !Frame {
         const snapshot = try views.Snapshot.create(app.allocator);
         errdefer snapshot.destroy();
-        return .{ .arena = std.heap.ArenaAllocator.init(app.allocator), .app = app, .layout = try .init(app.allocator, scale), .size = size, .clip = .{ .size = size }, .scale = scale, .snapshot = snapshot };
+        return .{ .arena = std.heap.ArenaAllocator.init(app.allocator), .app = app, .layout = try .init(app.allocator, scale), .size = size, .clip = .{ .size = size }, .scale = scale, .snapshot = snapshot, .text_system = if (app.text_system) |system| system.retain() else null };
     }
     pub fn deinit(self: *Frame) void {
+        defer if (self.text_system) |system| system.release();
+        for (self.text_layouts.items) |text_layout| text_layout.destroy();
+        self.scene.deinit(self.allocator());
         self.layout.deinit();
         self.arena.deinit();
         if (self.owns_snapshot) self.snapshot.destroy();
@@ -47,7 +54,13 @@ pub const Frame = struct {
         owned.listeners = try self.allocator().dupe(dispatch.Listener, value.listeners);
         owned.bindings = try self.allocator().dupe(dispatch.Binding, value.bindings);
         owned.key_context = if (value.key_context) |name| try self.allocator().dupe(u8, name) else null;
+        if (owned.text_style) |*style| if (style.font) |*font| {
+            font.family = try self.allocator().dupe(u8, font.family);
+        };
         return self.element(owned);
+    }
+    pub fn text(self: *Frame, value: []const u8, options: @import("text.zig").Options) !elements.AnyElement {
+        return @import("text.zig").create(self, value, options);
     }
     pub fn view(self: *Frame, entity: anytype) !elements.AnyElement {
         if (self.phase != .render) return error.InvalidPhase;
@@ -74,11 +87,12 @@ pub const Frame = struct {
         const id = try root.requestLayout(self);
         self.phase = .compute_layout;
         self.layout.compute(id, self.size);
+        if (self.layout.measure_error) |err| return err;
         self.phase = .prepaint;
         try root.prepaint(self);
         self.phase = .paint;
         try root.paint(self);
-        self.snapshot.scene = try self.snapshot.memory().dupe(@import("scene.zig").Primitive, self.scene.primitives.items);
+        self.snapshot.scene = try @import("scene.zig").Scene.copyPrimitives(self.snapshot.memory(), self.scene.primitives.items);
         self.snapshot.hitboxes = try self.snapshot.memory().dupe(Hitbox, self.hitboxes.items);
         try self.snapshot.indexReaders();
         self.phase = .complete;
@@ -248,6 +262,7 @@ pub const Frame = struct {
             const id = self.snapshot.views.items.len;
             view_map[i] = id;
             var copy = v;
+            if (copy.cache) |*nested_cache| nested_cache.key.text_style.font.family = try self.snapshot.memory().dupe(u8, nested_cache.key.text_style.font.family);
             copy.previous = i;
             copy.parent = view_map[v.parent.?].?;
             copy.dependencies = .empty;
@@ -304,7 +319,7 @@ pub const Frame = struct {
     }
     pub fn reusePaint(self: *Frame, view_id: usize, cache: views.Cache) !void {
         const start = self.scene.primitives.items.len;
-        try self.scene.primitives.appendSlice(self.allocator(), self.previous.?.scene[cache.scene.start..cache.scene.end]);
+        try self.scene.appendPrimitives(self.allocator(), self.previous.?.scene[cache.scene.start..cache.scene.end]);
         for (self.snapshot.views.items, 0..) |*v, i| {
             if (i == view_id or !self.snapshot.descendant(i, view_id)) continue;
             if (v.cache) |*nested| nested.scene = rebase(nested.scene, cache.scene.start, start);

@@ -41,6 +41,8 @@ pub const Layout = struct {
     nodes: std.ArrayList(LayoutId) = .empty,
     /// Scoped origin for detached cached-subtree layouts.
     offset: g.Point = .{},
+    /// Yoga callbacks cannot return Zig errors; measured elements report them here.
+    measure_error: ?anyerror = null,
 
     pub fn init(allocator: std.mem.Allocator, scale: f32) !Layout {
         if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidScale;

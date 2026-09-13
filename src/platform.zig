@@ -71,6 +71,7 @@ pub const Platform = struct {
         run: *const fn (*anyopaque) void,
         quit: *const fn (*anyopaque) void,
         wake: *const fn (*anyopaque) void,
+        text_system: *const fn (*anyopaque) *@import("text_system.zig").TextSystem,
     };
     pub fn init(a: std.mem.Allocator) !Platform {
         return switch (@import("build_options").platform) {
@@ -81,6 +82,9 @@ pub const Platform = struct {
     }
     pub fn deinit(self: Platform) void {
         self.vtable.deinit(self.ptr);
+    }
+    pub fn textSystem(self: Platform) *@import("text_system.zig").TextSystem {
+        return self.vtable.text_system(self.ptr);
     }
     pub fn openWindow(self: Platform, options: WindowOptions) !PlatformWindow {
         return self.vtable.open_window(self.ptr, options);

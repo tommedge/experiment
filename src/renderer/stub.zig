@@ -21,9 +21,11 @@ pub const Stub = struct {
         self.scale = scale;
     }
     pub fn submit(self: *Stub, scene: *const Scene) !void {
-        try self.scene.primitives.ensureTotalCapacity(self.allocator, scene.primitives.items.len);
-        self.scene.primitives.clearRetainingCapacity();
-        self.scene.primitives.appendSliceAssumeCapacity(scene.primitives.items);
+        var next: Scene = .{};
+        errdefer next.deinit(self.allocator);
+        try next.appendPrimitives(self.allocator, scene.primitives.items);
+        self.scene.deinit(self.allocator);
+        self.scene = next;
         self.presented_frames += 1;
     }
 };

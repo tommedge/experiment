@@ -1,7 +1,7 @@
 # zigui
 
 A Zig 0.16 rendering-framework foundation inspired by GPUI, using **real Yoga
-3.2.1 flexbox layout**, **native macOS windowing and Metal rendering**, and a
+3.2.1 flexbox layout**, **native macOS windowing, CoreText shaping and Metal rendering**, and a
 headless rendering backend for tests and embedding.
 
 The framework implements the view/element lifecycle, entity updates, subscriptions,
@@ -16,7 +16,7 @@ there are no Objective-C or Objective-C++ source files.
 zig build                  # installs zig-out/bin/counter
 zig build run              # headless counter demonstration
 zig build run-desktop      # move pointer; Space increments; T changes both colors
-zig build run-desktop -- --smoke  # verify Metal, selective cache reuse and actions
+zig build run-desktop -- --smoke  # verify text/Metal, selective cache reuse and actions
 zig build test --summary all
 zig build test -Dnative-tests=true --summary all # macOS integration; opens windows
 zig build -Dbackend=stub -Doptimize=ReleaseSafe
@@ -68,6 +68,11 @@ Entity(T).update(callback)
 | `src/view.zig` | Entity-backed view boundaries and explicit cached-subtree layout/replay |
 | `src/view_state.zig` | Committed snapshots, per-view reads, reader indexes and cache ranges |
 | `src/dispatch.zig` | View-aware input tree, stable focus, typed actions and contextual keybindings |
+| `src/text_system.zig` | Portable fonts, shaped runs, caret positions, wrapping and bounded line cache |
+| `src/platform/macos/text.zig` | CoreText font resolution/fallback and CoreGraphics glyph rasterization |
+| `src/text.zig` | Styled, Yoga-measured text element |
+| `src/renderer/atlas.zig` | Renderer-independent glyph packing and bounded raster cache |
+| `src/text/stub.zig` | Explicit deterministic text backend for headless tests |
 
 ### Frame phases
 
@@ -196,7 +201,9 @@ dimensions, padding and flex rules. Contents do not contribute intrinsic size
 back to the parent; use an ordinary view for content-driven outer sizing.
 
 Reuse requires clean dependency/ancestor state and matching bounds, effective
-clip, viewport, scale and boundary style. `Window.invalidate()` explicitly
+clip, viewport, scale, boundary style and inherited text style. Replacing the
+App's text service or changing its cache generation also refreshes the window.
+`Window.invalidate()` explicitly
 bypasses caches. Resize and focus changes currently conservatively refresh all
 cached views, including views that queried `frame.isFocused(handle)`.
 
@@ -289,6 +296,114 @@ entity. Moving the pointer rebuilds the quad view while reusing the sidebar;
 and rebuilds both, and **Cmd-Q** quits. The smoke run asserts selective reuse,
 cursor positioning and action updates; normal exit prints render/cache counters.
 
+### Text system
+
+Text follows GPUI's separation of responsibilities:
+
+```text
+Font / TextStyle / UTF-8 TextRun
+    → TextSystem: resolve FontId, cache LineLayout, wrap visual lines
+    → PlatformTextSystem: shape into actual-font ShapedRuns and ShapedGlyphs
+    → Text element: Yoga measurement → prepaint → glyph scene primitives
+    → renderer atlas: rasterize by font / glyph / size / scale / subpixel phase
+    → Metal: ordered solid, coverage and color-glyph batches
+```
+
+`Platform.textSystem()` returns the platform's shared text service. Native windows
+install it into the App automatically unless another service was supplied using
+`app.setTextSystem(system)`. The platform interface owns font resolution, metrics,
+line shaping, raster bounds and glyph rasterization. Framework text types contain
+no CoreText, CoreGraphics or Metal objects. Its implementation is UI-thread-only,
+consistent with the rest of this framework.
+
+On macOS, the implementation adapts the CoreText setup from `../editor`, but
+interns the **actual fonts returned by shaped fallback runs** rather than
+rasterizing every glyph through one fixed font. Font descriptors specify family,
+normal/bold weight and normal/italic style. Fonts are size-independent IDs; shaping
+uses logical pixel sizes and rasterization additionally uses backing scale.
+
+```zig
+const label = try frame.text("Hello, café 👩‍💻", .{
+    .style = .{
+        .font = .{ .family = "Helvetica", .weight = .bold },
+        .font_size = 18,
+        .color = .{ .r = 0.9, .g = 0.9, .b = 1 },
+    },
+    .wrap = true,
+    .layout_style = .{ .max_width = 240 },
+});
+
+const styled = try frame.text("Hello world", .{
+    .runs = &.{
+        .{ .len = 6, .font = .{ .weight = .bold } },
+        .{ .len = 5, .color = .{ .r = 0.2, .g = 0.8, .b = 1 } },
+    },
+});
+```
+
+`Div.text_style` supplies inherited overrides; each `Text` can refine them. The
+default is 14-pixel Menlo with white text. Optional text-run fonts/colors inherit
+when absent. Run lengths cover the entire string in **UTF-8 bytes**, and run ends
+must be valid UTF-8 boundaries. Text element creation copies the source, runs and
+font-family strings into frame storage, so temporary formatted strings are safe.
+
+Text participates in Yoga through real measurement and baseline callbacks.
+Explicit newlines (including CRLF and empty lines) are always respected; `.wrap`
+adds width-constrained wrapping. The generic wrapper prefers spaces/hyphens, then
+grapheme boundaries, and reshapes each resulting line for contextual joining and
+kerning. One grapheme wider than the available width is allowed to overflow;
+normal clipping controls visibility. This is a basic wrapper rather than a full
+Unicode line-breaking/hyphenation engine. Set `.style.line_height` for an explicit
+logical line height. Callback failures abort presentation through the framework's
+normal transactional error path.
+
+For custom elements, use `TextSystem.fontId`, `fontMetrics`, `shapeLine`,
+`layoutText` and `rasterizeGlyph`. `FontMetrics` are font-space values, scaled by
+`font_size / units_per_em`. `LineLayout` exposes actual-font runs, baseline-relative
+glyph positions, source byte indexes and grapheme caret positions. Its
+`xForIndex`, `closestIndexForX` and `indexForX` helpers use primary caret positions
+and do not assume that visual x order matches logical byte order. Native shaping
+converts CoreText's UTF-16 indexes into UTF-8 offsets; the separate platform text
+**input** interface continues using UTF-16 ranges for AppKit text services.
+
+The shared shaping cache holds up to 128 lines by default, keyed by text, size and
+resolved font runs. `shapeLine` returns a retained line: call `line.release()`;
+eviction does not invalidate caller-held lines. `layoutText` returns an owned
+multiline layout: call `layout.destroy()`. `clearCache()` advances the generation;
+hosts should schedule a frame after manually clearing it. `App.setTextSystem`
+retains the new service and schedules its own wakeup. Each frame freezes its
+selected text service, and emitted glyph scenes retain it independently.
+
+Cached views store glyph descriptors, not atlas tiles or temporary shaped layouts.
+Replay retains the descriptors' service references. The stub renderer likewise
+owns its captured glyph scene. This preserves old presentation data on failure
+and allows text services to be replaced safely while older snapshots exist.
+
+The glyph atlas has separate alpha-coverage and premultiplied RGBA pages. Keys
+include service identity/generation, actual font ID, glyph ID, size, scale and
+quarter-device-pixel phase. Its default limits are 32 MiB and 8,192 entries. When
+historical entries fill it, Metal rebuilds the current frame's glyph set before
+creating draw instances; a frame that itself exceeds the budget returns an error
+rather than silently omitting glyphs. Color emoji retain their native colors and
+use the text color's alpha. Atlas uploads, clipping and batching preserve scene
+order, including interleaved translucent quads and glyphs.
+
+Headless callers can explicitly inject the deterministic test backend:
+
+```zig
+const fonts = blk: {
+    const backend = try ui.text.stub.create(allocator);
+    errdefer backend.deinit();
+    break :blk try ui.TextSystem.create(allocator, backend);
+};
+defer fonts.release();
+app.setTextSystem(fonts);
+```
+
+The test backend uses synthetic monospace metrics and rectangular glyphs; native
+windows always use CoreText by default. The desktop demo displays counter labels
+and a cached multilingual sample with styled runs, wrapping and color emoji.
+
 ### Native macOS integration
 
 ```zig
@@ -369,8 +484,8 @@ Backends own their resources. `submit` must consume/copy commands before returni
 no pointers into frame memory may escape. A GPU implementation can copy into
 backend-owned in-flight buffers and manage fences internally. Failed submission
 must preserve its last successful presentation. The platform adapter owns native
-window/surface creation. Metal uploads a per-frame instance buffer, clips solid
-quads in logical coordinates, preserves scene order, uses source-alpha blending
+window/surface creation. Metal uploads per-frame solid/glyph instances, clips them
+in logical coordinates, preserves scene order, uses source-alpha blending
 and an sRGB drawable for the scene's linear colors. It waits for GPU completion
 before presentation, bounding resource lifetime and checking submission errors.
 This intentionally simple backend is synchronous rather than a pipelined renderer.
@@ -398,8 +513,8 @@ This intentionally simple backend is synchronous rather than a pipelined rendere
   failure. Yoga itself allocates via C++; Zig allocation-failure tests cover the
   Zig-owned portion of the pipeline.
 
-The current scene contains clipped solid quads. Text shaping/rasterization,
-image resources, accessibility and a general-purpose persistent custom-element
+The current scene contains clipped solid quads and shaped glyphs. General-purpose
+image resources, accessibility and a persistent custom-element
 state API remain extension points. Cached view state retains rendered output and
 dispatch/dependency metadata; temporary custom-element phase state is recreated
 on a cache miss. This is a GPUI-inspired foundation, not full API compatibility.
@@ -413,6 +528,7 @@ The implementation follows the lifecycle and reactive concepts from:
 - [GPUI Subscription lifecycle and delivery semantics](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/subscription.rs)
 - [GPUI cached view state](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/view.rs)
 - [GPUI key dispatch tree](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/key_dispatch.rs)
+- [GPUI text system and shaped lines](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/text_system.rs)
 - [Ghostty compile-time Renderer selection](https://github.com/ghostty-org/ghostty/blob/main/src/renderer.zig)
 - [Yoga 3.2.1](https://github.com/facebook/yoga/tree/v3.2.1)
 
@@ -425,3 +541,7 @@ Opt-in native tests additionally create two independent Metal windows, render
 clipped/translucent scenes, resize, dispatch Unicode text/composition and synthetic
 AppKit key events, run the real event loop, verify independent close/teardown, and
 dispatch a native keybinding through a focused listener in a reused cached subtree.
+Text tests cover UTF-8 run validation, wrapping, measurement, inherited-style cache
+invalidation, retained line/glyph ownership, failure rollback and atlas packing.
+Native tests cover CoreText fallback, RTL/grapheme indexes, bitmap orientation,
+Retina/color rasterization and Metal atlas eviction while replaying a glyph scene.

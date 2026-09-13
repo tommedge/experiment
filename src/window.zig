@@ -26,6 +26,8 @@ pub fn WindowWithRenderer(comptime Renderer: type) type {
         invalidation_revision: u64 = 0,
         focused: ?u64 = null,
         snapshot: ?*views.Snapshot = null,
+        text_revision: u64 = 0,
+        text_generation: u64 = 0,
         dependencies: std.ArrayList(reactive.Dependency) = .empty,
         hitboxes: std.ArrayList(frame.Hitbox) = .empty,
 
@@ -68,10 +70,14 @@ pub fn WindowWithRenderer(comptime Renderer: type) type {
         }
         pub fn needsDraw(self: *const Self) bool {
             if (self.dirty) return true;
+            if (self.textChanged()) return true;
             for (self.dependencies.items) |dep| {
                 if (self.app.revision(dep.id) != dep.revision) return true;
             }
             return false;
+        }
+        fn textChanged(self: *const Self) bool {
+            return self.text_revision != self.app.text_revision or self.text_generation != (if (self.app.text_system) |system| system.generation else 0);
         }
         pub fn drawIfNeeded(self: *Self) !bool {
             if (self.drawing or self.dispatching or self.app.tracking != null or self.app.view_tracking != null or self.app.depth != 0 or self.app.flushing) return error.FrameDuringUpdate;
@@ -86,7 +92,9 @@ pub fn WindowWithRenderer(comptime Renderer: type) type {
             defer next.deinit();
             next.previous = self.snapshot;
             next.focused = self.focused;
-            if (self.snapshot) |snapshot| next.dirty_views = try snapshot.dirtyViews(next.allocator(), self.app, self.refresh);
+            if (self.snapshot) |snapshot| next.dirty_views = try snapshot.dirtyViews(next.allocator(), self.app, self.refresh or self.textChanged());
+            const text_revision = self.app.text_revision;
+            const text_generation = if (self.app.text_system) |system| system.generation else 0;
             var deps: std.ArrayList(reactive.Dependency) = .empty;
             defer deps.deinit(self.app.allocator);
             self.app.tracking = &deps;
@@ -104,6 +112,8 @@ pub fn WindowWithRenderer(comptime Renderer: type) type {
             if (previous) |snapshot| snapshot.destroy();
             self.dirty = self.invalidation_revision != invalidation_revision;
             self.refresh = self.dirty;
+            self.text_revision = text_revision;
+            self.text_generation = text_generation;
             const old_focus = self.focused;
             self.reconcileFocus(old_focus);
             return true;

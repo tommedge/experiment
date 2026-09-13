@@ -19,6 +19,11 @@ pub const CacheKey = struct {
     viewport: g.Size,
     scale: f32,
     style: layout.Style,
+    text_style: @import("text_system.zig").TextStyle,
+    pub fn eql(a: CacheKey, b: CacheKey) bool {
+        return std.meta.eql(a.bounds, b.bounds) and std.meta.eql(a.clip, b.clip) and std.meta.eql(a.viewport, b.viewport) and
+            a.scale == b.scale and std.meta.eql(a.style, b.style) and a.text_style.eql(b.text_style);
+    }
 };
 /// A view subtree's reusable output ranges and their validity key. Node ranges
 /// exclude the boundary node, which is recreated on replay. painted distinguishes
@@ -66,6 +71,7 @@ pub const Snapshot = struct {
         return self.arena.allocator();
     }
     pub fn destroy(self: *Snapshot) void {
+        for (self.scene) |primitive| primitive.release();
         for (self.owners.items) |owner| owner.release();
         self.arena.deinit();
         self.allocator.destroy(self);

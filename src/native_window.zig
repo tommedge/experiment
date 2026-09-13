@@ -17,6 +17,7 @@ pub const NativeWindow = struct {
     } = null,
 
     pub fn create(app: *ui.App, platform: p.Platform, root: anytype, options: p.WindowOptions) !*NativeWindow {
+        if (app.text_system == null) app.setTextSystem(platform.textSystem());
         const surface = try platform.openWindow(options);
         errdefer surface.deinit();
         const self = try app.allocator.create(NativeWindow);

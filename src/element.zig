@@ -85,14 +85,21 @@ pub const Div = struct {
     listeners: []const @import("dispatch.zig").Listener = &.{},
     bindings: []const @import("dispatch.zig").Binding = &.{},
     text_input: ?@import("dispatch.zig").TextInput = null,
+    text_style: ?@import("text_system.zig").TextStyleRefinement = null,
 
     pub fn requestLayout(self: *Div, f: *Frame) !LayoutRequest(void) {
+        const inherited = f.text_style;
+        if (self.text_style) |style| f.text_style = inherited.refine(style);
+        defer f.text_style = inherited;
         if (self.style.hidden) return .{ .id = try f.layout.request(self.style, &.{}), .state = {} };
         const ids = try f.allocator().alloc(layout.LayoutId, self.children.len);
         for (self.children, 0..) |child, i| ids[i] = try child.requestLayout(f);
         return .{ .id = try f.layout.request(self.style, ids), .state = {} };
     }
     pub fn prepaint(self: *Div, f: *Frame, bounds: g.Bounds, _: *void) !g.Bounds {
+        const inherited = f.text_style;
+        if (self.text_style) |style| f.text_style = inherited.refine(style);
+        defer f.text_style = inherited;
         const old_clip = f.clip;
         defer f.clip = old_clip;
         if (self.style.hidden) return old_clip;
@@ -103,6 +110,9 @@ pub const Div = struct {
         return f.clip;
     }
     pub fn paint(self: *Div, f: *Frame, bounds: g.Bounds, _: *void, clip: *g.Bounds) !void {
+        const inherited = f.text_style;
+        if (self.text_style) |style| f.text_style = inherited.refine(style);
+        defer f.text_style = inherited;
         if (self.style.hidden) return;
         const old_clip = f.clip;
         defer f.clip = old_clip;

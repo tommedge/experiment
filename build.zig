@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
     if (selected_platform == .macos) {
         mod.addImport("objc", b.dependency("zig_objc", .{ .target = target, .optimize = optimize }).module("objc"));
         mod.linkSystemLibrary("objc", .{});
-        for ([_][]const u8{ "Foundation", "AppKit", "Metal", "QuartzCore" }) |framework| mod.linkFramework(framework, .{});
+        for ([_][]const u8{ "Foundation", "AppKit", "Metal", "QuartzCore", "CoreText", "CoreGraphics", "CoreFoundation" }) |framework| mod.linkFramework(framework, .{});
     }
     const example = b.addExecutable(.{ .name = "counter", .root_module = b.createModule(.{
         .root_source_file = b.path("examples/counter.zig"),

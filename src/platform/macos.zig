@@ -6,12 +6,14 @@ const objc = bridge.objc;
 const c = bridge.c;
 const object = bridge.object;
 const Metal = @import("../renderer/metal.zig").Metal;
+const TextSystem = @import("../text_system.zig").TextSystem;
 const Range = extern struct { location: c_ulong, length: c_ulong };
 const not_found: usize = @intCast(std.math.maxInt(isize));
 
 const MacPlatform = struct {
     allocator: std.mem.Allocator,
     application: objc.Object,
+    text_system: *TextSystem,
     windows: std.ArrayList(*MacWindow) = .empty,
     running: bool = false,
     wake_pending: bool = false,
@@ -22,6 +24,7 @@ const MacPlatform = struct {
         const self = cast(ptr);
         std.debug.assert(self.windows.items.len == 0);
         self.windows.deinit(self.allocator);
+        self.text_system.release();
         self.allocator.destroy(self);
     }
     fn wake(ptr: *anyopaque) void {
@@ -100,7 +103,10 @@ const MacPlatform = struct {
         self.application.msgSend(void, "activateIgnoringOtherApps:", .{true});
         return .{ .ptr = state, .vtable = &MacWindow.vtable };
     }
-    const vtable: p.Platform.VTable = .{ .deinit = deinit, .open_window = openWindow, .run = run, .quit = quit, .wake = wake };
+    fn textSystem(ptr: *anyopaque) *TextSystem {
+        return cast(ptr).text_system;
+    }
+    const vtable: p.Platform.VTable = .{ .deinit = deinit, .open_window = openWindow, .run = run, .quit = quit, .wake = wake, .text_system = textSystem };
 };
 
 const MacWindow = struct {
@@ -413,7 +419,11 @@ pub fn create(a: std.mem.Allocator) !p.Platform {
     const application = objc.getClass("NSApplication").?.msgSend(objc.Object, "sharedApplication", .{});
     _ = application.msgSend(bool, "setActivationPolicy:", .{@as(isize, 0)});
     const self = try a.create(MacPlatform);
-    self.* = .{ .allocator = a, .application = application };
+    errdefer a.destroy(self);
+    const text_backend = try @import("macos/text.zig").create(a);
+    errdefer text_backend.deinit();
+    const text_system = try TextSystem.create(a, text_backend);
+    self.* = .{ .allocator = a, .application = application, .text_system = text_system };
     return .{ .ptr = self, .vtable = &MacPlatform.vtable };
 }
 
@@ -440,6 +450,7 @@ test "native key binding reaches a focused listener retained by cached subtree r
                 .focus = self.focus,
                 .key_context = "Counter",
                 .id = 1,
+                .children = &.{try f.text("F café 👩‍💻", .{})},
                 .listeners = &.{try f.entityActionListener(cx.entity, Increment, increment)},
                 .bindings = &.{try f.bindKey("space", .{}, "Counter", Increment{})},
                 .style = .{ .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 10 }, .height = .{ .px = 20 }, .background = .{ .r = 0.7 } },
@@ -486,6 +497,27 @@ test "native key binding reaches a focused listener retained by cached subtree r
     try std.testing.expectEqual(@as(usize, 2), renders);
     try std.testing.expectEqual(@as(usize, 1), hosted.content.inspect().?.cache_hits);
     const native = MacWindow.cast(hosted.surface.ptr);
+    try std.testing.expect(native.renderer.atlas.entries.count() > 0);
+    var saw_color = false;
+    for (native.renderer.atlas.pages.items) |page| if (page.format == .rgba8) {
+        saw_color = true;
+    };
+    try std.testing.expect(saw_color);
+    // Fill the cache with historical glyphs, then render the retained scene at
+    // another scale. The renderer must rebuild the atlas without stale tiles.
+    var scene: ui.scene.Scene = .{};
+    defer scene.deinit(application.allocator);
+    try scene.appendPrimitives(application.allocator, hosted.content.inspect().?.scene);
+    const first_glyph = scene.primitives.items[1].glyph;
+    native.renderer.atlas.max_entries = native.renderer.atlas.entries.count() + 1;
+    var old_key = @import("../renderer/atlas.zig").Key.init(first_glyph, 1);
+    old_key.size = @bitCast(@as(f32, 100));
+    _ = try native.renderer.atlas.ensure(old_key);
+    try native.renderer.resize(native.current.size, 2);
+    try hosted.surface.draw(&scene);
+    try std.testing.expect(native.renderer.atlas.entries.get(old_key) == null);
+    native.renderer.atlas.max_entries = 8192;
+    try native.renderer.resize(native.current.size, native.current.scale);
     const event = objc.getClass("NSEvent").?.msgSend(objc.Object, "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:", .{
         @as(usize, 10), bridge.Point{ .x = 0, .y = 0 }, @as(usize, 0), @as(f64, 0), native.window.msgSend(isize, "windowNumber", .{}), @as(c.id, null), bridge.string(" "), bridge.string(" "), false, @as(u16, 49),
     });
