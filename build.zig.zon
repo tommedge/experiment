@@ -1,0 +1,13 @@
+.{
+    .name = .zigui,
+    .version = "0.1.0",
+    .dependencies = .{
+        .yoga = .{
+            .url = "https://github.com/facebook/yoga/archive/refs/tags/v3.2.1.tar.gz",
+            .hash = "N-V-__8AAOYl0gAU76B1VRPFD9AWvy2VkOef2jN0B3sISTeO",
+        },
+    },
+    .fingerprint = 0x18d03e10be01d396,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "README.md" },
+}
