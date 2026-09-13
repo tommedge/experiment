@@ -53,8 +53,7 @@ const MacPlatform = struct {
             for (self.windows.items) |window| {
                 if (window.closed) continue;
                 open = true;
-                window.syncMetrics();
-                if (window.callbacks) |cb| cb.request_frame(cb.context, .{});
+                window.serviceFrame();
             }
             if (!open or !self.running) break;
             self.application.msgSend(void, "updateWindows", .{});
@@ -89,8 +88,10 @@ const MacPlatform = struct {
         setState(delegate, state);
         window.msgSend(void, "setDelegate:", .{delegate});
         window.msgSend(void, "setTitle:", .{bridge.string(options.title)});
-        view.msgSend(void, "setLayer:", .{renderer.layer});
         view.msgSend(void, "setWantsLayer:", .{true});
+        // NSViewLayerContentsRedrawDuringViewResize: AppKit requests display for
+        // each live-resize transaction instead of scaling the existing contents.
+        view.msgSend(void, "setLayerContentsRedrawPolicy:", .{@as(usize, 2)});
         view.msgSend(void, "setAutoresizingMask:", .{@as(usize, 18)});
         window.msgSend(void, "setContentView:", .{view});
         window.msgSend(void, "setAcceptsMouseMovedEvents:", .{true});
@@ -121,15 +122,26 @@ const MacWindow = struct {
     marked_length: usize = 0,
     selection: Range = .{ .location = 0, .length = 0 },
     text_input_handler: ?input.TextInputHandler = null,
+    /// A pending layer redraw is distinct from reactive model invalidation.
+    /// Layer redraws must run through displayLayer: with transactional presentation.
+    layer_pending: bool = true,
+    /// Covers input, resize, focus and frame callbacks, including embedding code.
+    callback_depth: usize = 0,
+    /// Nested NSView/renderer geometry changes must finish before a frame starts.
+    resizing: usize = 0,
+    /// Also guards direct PlatformWindow.draw calls outside frame callbacks.
+    drawing: bool = false,
     fn cast(ptr: *anyopaque) *MacWindow {
         return @ptrCast(@alignCast(ptr));
     }
     fn deinit(ptr: *anyopaque) void {
         const self = cast(ptr);
+        std.debug.assert(self.callback_depth == 0 and self.resizing == 0 and !self.drawing);
         self.callbacks = null;
         setState(self.view, null);
         setState(self.delegate, null);
         self.window.msgSend(void, "setDelegate:", .{@as(c.id, null)});
+        self.renderer.layer.msgSend(void, "setDelegate:", .{@as(c.id, null)});
         self.window.msgSend(void, "close", .{});
         self.view.msgSend(void, "setLayer:", .{@as(c.id, null)});
         self.renderer.deinit();
@@ -148,14 +160,35 @@ const MacWindow = struct {
     fn setCallbacks(ptr: *anyopaque, cb: ?p.WindowCallbacks) void {
         const self = cast(ptr);
         self.callbacks = cb;
-        if (cb) |callbacks| if (callbacks.focus) |f| f(callbacks.context, self.window.msgSend(bool, "isKeyWindow", .{}));
+        if (cb) |callbacks| {
+            self.callback_depth += 1;
+            defer self.callback_depth -= 1;
+            if (callbacks.focus) |f| f(callbacks.context, self.window.msgSend(bool, "isKeyWindow", .{}));
+            self.requestDisplay();
+        }
     }
     fn requestFrame(ptr: *anyopaque) void {
-        MacPlatform.wake(cast(ptr).platform);
+        cast(ptr).requestDisplay();
     }
     fn draw(ptr: *anyopaque, scene: *const @import("../scene.zig").Scene) !void {
         const self = cast(ptr);
         if (self.closed or self.window.msgSend(bool, "isMiniaturized", .{})) return error.SurfaceUnavailable;
+        if (self.drawing) return error.FrameDuringPresentation;
+        const bounds = self.view.msgSend(bridge.Rect, "bounds", .{});
+        const scale: f32 = @floatCast(self.window.msgSend(f64, "backingScaleFactor", .{}));
+        if (@as(f32, @floatCast(bounds.size.width)) != self.current.size.width or
+            @as(f32, @floatCast(bounds.size.height)) != self.current.size.height or scale != self.current.scale)
+        {
+            self.requestDisplay();
+            return error.SurfaceChangedDuringFrame;
+        }
+        self.drawing = true;
+        defer self.drawing = false;
+        // Embedders can draw directly before the first layer callback. Honor a
+        // pending geometry transaction on that path as well.
+        const previous = self.renderer.presents_with_transaction;
+        if (self.layer_pending) self.renderer.setPresentsWithTransaction(true);
+        defer self.renderer.setPresentsWithTransaction(previous);
         try self.renderer.submit(scene);
     }
     fn setTitle(ptr: *anyopaque, title: [:0]const u8) void {
@@ -179,15 +212,64 @@ const MacWindow = struct {
         native.msgSend(void, "set", .{});
     }
     fn syncMetrics(self: *MacWindow) void {
+        if (self.closed) return;
         const bounds = self.view.msgSend(bridge.Rect, "bounds", .{});
         const next = p.Metrics{ .size = .{ .width = @floatCast(bounds.size.width), .height = @floatCast(bounds.size.height) }, .scale = @floatCast(self.window.msgSend(f64, "backingScaleFactor", .{})) };
         if (std.meta.eql(next, self.current)) return;
+        if (self.drawing or self.callback_depth != 0) {
+            self.requestDisplay();
+            return;
+        }
+        self.resizing += 1;
+        defer self.finishResize();
         self.current = next;
         self.renderer.resize(next.size, next.scale) catch unreachable;
-        if (self.callbacks) |cb| cb.resize(cb.context, next);
+        if (self.callbacks) |cb| {
+            self.callback_depth += 1;
+            defer self.callback_depth -= 1;
+            cb.resize(cb.context, next);
+        }
+        self.requestDisplay();
+    }
+    fn finishResize(self: *MacWindow) void {
+        self.resizing -= 1;
+        // Backing-scale changes need a display even when bounds did not change.
+        // Reapply the flag after the entire metrics/resize callback scope exits,
+        // so CA can service it in AppKit's nested tracking loop without our wake.
+        if (self.resizing == 0 and self.callback_depth == 0 and !self.drawing and !self.closed and self.layer_pending)
+            self.renderer.layer.msgSend(void, "setNeedsDisplay", .{});
+    }
+    fn requestDisplay(self: *MacWindow) void {
+        if (self.closed) return;
+        self.layer_pending = true;
+        // Marking a layer while its display callback is active can be swallowed
+        // when CA clears needsDisplay. The next UI-loop turn reapplies this flag.
+        if (self.callback_depth == 0 and !self.drawing and self.resizing == 0)
+            self.renderer.layer.msgSend(void, "setNeedsDisplay", .{});
+        MacPlatform.wake(self.platform);
+    }
+    fn serviceFrame(self: *MacWindow) void {
+        if (self.callback_depth != 0 or self.drawing or self.resizing != 0) {
+            self.requestDisplay();
+            return;
+        }
+        self.syncMetrics();
+        if (self.closed) return;
+        if (self.layer_pending) {
+            self.renderer.layer.msgSend(void, "setNeedsDisplay", .{});
+            self.renderer.layer.msgSend(void, "displayIfNeeded", .{});
+        } else if (self.callbacks) |cb| {
+            self.callback_depth += 1;
+            defer self.callback_depth -= 1;
+            cb.request_frame(cb.context, .{});
+        }
     }
     fn emit(self: *MacWindow, event: input.PlatformInput) input.DispatchEventResult {
-        if (self.callbacks) |cb| return cb.input(cb.context, event);
+        if (self.callbacks) |cb| {
+            self.callback_depth += 1;
+            defer self.callback_depth -= 1;
+            return cb.input(cb.context, event);
+        }
         return .{};
     }
     const vtable: p.PlatformWindow.VTable = .{ .deinit = deinit, .metrics = metrics, .set_callbacks = setCallbacks, .request_frame = requestFrame, .draw = draw, .set_title = setTitle, .set_cursor = setCursor, .set_text_input_handler = setTextInputHandler };
@@ -204,6 +286,51 @@ fn yes(_: c.id, _: c.SEL) callconv(.c) bool {
 }
 fn firstMouse(_: c.id, _: c.SEL, _: c.id) callconv(.c) bool {
     return true;
+}
+fn makeBackingLayer(id: c.id, _: c.SEL) callconv(.c) c.id {
+    if (getState(id)) |self| return self.renderer.layer.value;
+    return object(id).msgSendSuper(objc.getClass("NSView").?, objc.Object, "makeBackingLayer", .{}).value;
+}
+fn setFrameSize(id: c.id, _: c.SEL, size: bridge.Size) callconv(.c) void {
+    const view = object(id);
+    const old = view.msgSend(bridge.Rect, "frame", .{}).size;
+    if (old.width == size.width and old.height == size.height) return;
+    const state = getState(id);
+    if (state) |self| self.resizing += 1;
+    defer if (state) |self| self.finishResize();
+    view.msgSendSuper(objc.getClass("NSView").?, void, "setFrameSize:", .{size});
+    if (state) |self| {
+        self.syncMetrics();
+        self.requestDisplay();
+    }
+}
+fn viewDidChangeBackingProperties(id: c.id, _: c.SEL) callconv(.c) void {
+    const state = getState(id);
+    if (state) |self| self.resizing += 1;
+    defer if (state) |self| self.finishResize();
+    object(id).msgSendSuper(objc.getClass("NSView").?, void, "viewDidChangeBackingProperties", .{});
+    if (state) |self| {
+        self.syncMetrics();
+        self.requestDisplay();
+    }
+}
+fn displayLayer(id: c.id, _: c.SEL, layer: c.id) callconv(.c) void {
+    const self = getState(id) orelse return;
+    if (self.closed or layer != self.renderer.layer.value) return;
+    if (self.callback_depth != 0 or self.drawing or self.resizing != 0) {
+        self.requestDisplay();
+        return;
+    }
+    self.syncMetrics();
+    if (self.closed) return;
+    const cb = self.callbacks orelse return;
+    self.layer_pending = false;
+    self.callback_depth += 1;
+    defer self.callback_depth -= 1;
+    const previous = self.renderer.presents_with_transaction;
+    self.renderer.setPresentsWithTransaction(true);
+    defer self.renderer.setPresentsWithTransaction(previous);
+    cb.request_frame(cb.context, .{ .force_render = true });
 }
 fn modifiers(flags: usize) input.Modifiers {
     return .{ .caps_lock = flags & (1 << 16) != 0, .shift = flags & (1 << 17) != 0, .control = flags & (1 << 18) != 0, .alt = flags & (1 << 19) != 0, .command = flags & (1 << 20) != 0, .function = flags & (1 << 23) != 0 };
@@ -374,20 +501,22 @@ fn command(_: c.id, _: c.SEL, _: c.SEL) callconv(.c) void {}
 fn changed(id: c.id, _: c.SEL, _: c.id) callconv(.c) void {
     if (getState(id)) |self| {
         self.syncMetrics();
-        // AppKit enters a nested event loop during live resize.
-        if (self.callbacks) |cb| cb.request_frame(cb.context, .{ .force_render = true });
-        MacPlatform.wake(self.platform);
+        self.requestDisplay();
     }
 }
 fn close(id: c.id, _: c.SEL, _: c.id) callconv(.c) void {
     if (getState(id)) |self| {
         self.closed = true;
+        self.callback_depth += 1;
+        defer self.callback_depth -= 1;
         if (self.callbacks) |cb| if (cb.close) |f| f(cb.context);
         MacPlatform.wake(self.platform);
     }
 }
 fn focus(id: c.id, _: c.SEL, _: c.id) callconv(.c) void {
     if (getState(id)) |self| {
+        self.callback_depth += 1;
+        defer self.callback_depth -= 1;
         if (self.callbacks) |cb| if (cb.focus) |f| f(cb.context, self.window.msgSend(bool, "isKeyWindow", .{}));
     }
 }
@@ -396,12 +525,17 @@ fn registerClasses() !void {
     const view = objc.allocateClassPair(objc.getClass("NSView").?, "ZiguiMetalView") orelse return error.NativeClassRegistrationFailed;
     if (c.class_addIvar(view.value, "zigState", @sizeOf(usize), @intCast(@ctz(@as(usize, @alignOf(usize)))), "^v") == 0) return error.NativeClassRegistrationFailed;
     inline for (.{
-        .{ "isFlipped", yes },                                     .{ "acceptsFirstResponder", yes },                                   .{ "acceptsFirstMouse:", firstMouse },
-        .{ "keyDown:", key },                                      .{ "keyUp:", key },                                                  .{ "flagsChanged:", key },
-        .{ "insertText:replacementRange:", insertText },           .{ "setMarkedText:selectedRange:replacementRange:", setMarkedText }, .{ "unmarkText", unmark },
-        .{ "hasMarkedText", hasMarked },                           .{ "markedRange", markedRange },                                     .{ "selectedRange", selectedRange },
-        .{ "validAttributesForMarkedText", attributes },           .{ "attributedSubstringForProposedRange:actualRange:", substring },  .{ "characterIndexForPoint:", characterIndex },
-        .{ "firstRectForCharacterRange:actualRange:", firstRect }, .{ "doCommandBySelector:", command },
+        .{ "makeBackingLayer", makeBackingLayer },                             .{ "setFrameSize:", setFrameSize },
+        .{ "viewDidChangeBackingProperties", viewDidChangeBackingProperties }, .{ "displayLayer:", displayLayer },
+        .{ "isFlipped", yes },                                                 .{ "acceptsFirstResponder", yes },
+        .{ "acceptsFirstMouse:", firstMouse },                                 .{ "keyDown:", key },
+        .{ "keyUp:", key },                                                    .{ "flagsChanged:", key },
+        .{ "insertText:replacementRange:", insertText },                       .{ "setMarkedText:selectedRange:replacementRange:", setMarkedText },
+        .{ "unmarkText", unmark },                                             .{ "hasMarkedText", hasMarked },
+        .{ "markedRange", markedRange },                                       .{ "selectedRange", selectedRange },
+        .{ "validAttributesForMarkedText", attributes },                       .{ "attributedSubstringForProposedRange:actualRange:", substring },
+        .{ "characterIndexForPoint:", characterIndex },                        .{ "firstRectForCharacterRange:actualRange:", firstRect },
+        .{ "doCommandBySelector:", command },
     }) |method| if (!view.addMethod(method[0], method[1])) return error.NativeClassRegistrationFailed;
     inline for (.{ "mouseDown:", "mouseUp:", "mouseMoved:", "mouseDragged:", "rightMouseDown:", "rightMouseUp:", "rightMouseDragged:", "otherMouseDown:", "otherMouseUp:", "otherMouseDragged:", "mouseEntered:", "mouseExited:", "scrollWheel:" }) |name| if (!view.addMethod(name, mouse)) return error.NativeClassRegistrationFailed;
     if (c.objc_getProtocol("NSTextInputClient")) |protocol| _ = c.class_addProtocol(view.value, protocol);
@@ -433,7 +567,7 @@ test "macOS modifier flags and scroll phases" {
     try std.testing.expectEqual(input.ScrollPhase.ended, phase(8));
 }
 
-test "native key binding reaches a focused listener retained by cached subtree replay" {
+test "native key binding reaches a focused view across cached and layer-driven redraws" {
     const ui = @import("../root.zig");
     // Action used to verify that an AppKit key reaches a retained typed listener.
     const Increment = struct {};
@@ -508,16 +642,21 @@ test "native key binding reaches a focused listener retained by cached subtree r
     var scene: ui.scene.Scene = .{};
     defer scene.deinit(application.allocator);
     try scene.appendPrimitives(application.allocator, hosted.content.inspect().?.scene);
+    // Test renderer-only scale changes on an unattached layer: an NSView-backed
+    // layer's scale is now controlled by AppKit's backing-property lifecycle.
+    var offscreen = try Metal.init(application.allocator, native.current.size, 1);
+    defer offscreen.deinit();
+    const initial_pixels = try offscreen.readPixelsForTest(&scene, application.allocator);
+    application.allocator.free(initial_pixels);
     const first_glyph = scene.primitives.items[1].glyph;
-    native.renderer.atlas.max_entries = native.renderer.atlas.entries.count() + 1;
+    offscreen.atlas.max_entries = offscreen.atlas.entries.count() + 1;
     var old_key = @import("../renderer/atlas.zig").Key.init(first_glyph, 1);
     old_key.size = @bitCast(@as(f32, 100));
-    _ = try native.renderer.atlas.ensure(old_key);
-    try native.renderer.resize(native.current.size, 2);
-    try hosted.surface.draw(&scene);
-    try std.testing.expect(native.renderer.atlas.entries.get(old_key) == null);
-    native.renderer.atlas.max_entries = 8192;
-    try native.renderer.resize(native.current.size, native.current.scale);
+    _ = try offscreen.atlas.ensure(old_key);
+    try offscreen.resize(native.current.size, 2);
+    const retina_pixels = try offscreen.readPixelsForTest(&scene, application.allocator);
+    application.allocator.free(retina_pixels);
+    try std.testing.expect(offscreen.atlas.entries.get(old_key) == null);
     const event = objc.getClass("NSEvent").?.msgSend(objc.Object, "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:", .{
         @as(usize, 10), bridge.Point{ .x = 0, .y = 0 }, @as(usize, 0), @as(f64, 0), native.window.msgSend(isize, "windowNumber", .{}), @as(c.id, null), bridge.string(" "), bridge.string(" "), false, @as(u16, 49),
     });
@@ -526,7 +665,140 @@ test "native key binding reaches a focused listener retained by cached subtree r
     try std.testing.expect(hosted.last_error == null);
     try std.testing.expectEqual(@as(u32, 2), (try counter.read()).value);
     _ = try hosted.content.drawIfNeeded();
-    try std.testing.expectEqual(@as(usize, 3), renders);
+    // AppKit can request additional launch/expose redraws. Verify the committed
+    // result of the action rather than assuming a fixed native callback count.
+    try std.testing.expectEqual(@as(f32, 20), hosted.content.inspect().?.scene[0].quad.bounds.size.width);
+}
+
+test "AppKit resize synchronizes metrics and presentation and defers reentrant display" {
+    const t = std.testing;
+    var pool = objc.AutoreleasePool.init();
+    defer pool.deinit();
+    const platform = try create(t.allocator);
+    defer platform.deinit();
+    const surface = try platform.openWindow(.{ .title = "zigui synchronized resize", .size = .{ .width = 200, .height = 120 } });
+    defer surface.deinit();
+    const native = MacWindow.cast(surface.ptr);
+    var scene: @import("../scene.zig").Scene = .{};
+    defer scene.deinit(t.allocator);
+    try scene.quad(t.allocator, .{ .bounds = .{ .origin = .{ .x = 10, .y = 10 }, .size = .{ .width = 30, .height = 20 } }, .clip = .{ .size = .{ .width = 1000, .height = 1000 } }, .color = .{ .b = 1 } });
+    // Observes the native lifecycle without replacing the actual Metal draw path.
+    const Capture = struct {
+        surface: p.PlatformWindow,
+        native: *MacWindow,
+        scene: *const @import("../scene.zig").Scene,
+        frames: usize = 0,
+        resizes: usize = 0,
+        transactional: usize = 0,
+        reenter: bool = false,
+        resize_in_frame: bool = false,
+        fail: bool = false,
+        failure: ?anyerror = null,
+        latest: ?p.Metrics = null,
+        fn cast(ptr: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(ptr));
+        }
+        fn frame(ptr: *anyopaque, options: p.RequestFrameOptions) void {
+            cast(ptr).draw(options) catch |err| {
+                cast(ptr).failure = err;
+            };
+        }
+        fn draw(self: *@This(), options: p.RequestFrameOptions) !void {
+            self.frames += 1;
+            try t.expectEqual(@as(usize, 1), self.native.callback_depth);
+            try t.expectEqualDeep(self.surface.metrics(), p.Metrics{ .size = self.native.renderer.size, .scale = self.native.renderer.scale });
+            if (options.force_render) {
+                try t.expect(self.native.renderer.presents_with_transaction);
+                try t.expect(self.native.renderer.layer.msgSend(bool, "presentsWithTransaction", .{}));
+                self.transactional += 1;
+            }
+            if (self.reenter) {
+                self.reenter = false;
+                const before = self.frames;
+                self.native.view.msgSend(void, "displayLayer:", .{self.native.renderer.layer});
+                try t.expectEqual(before, self.frames);
+                try t.expect(self.native.layer_pending);
+            }
+            if (self.resize_in_frame) {
+                self.resize_in_frame = false;
+                const before = self.surface.metrics();
+                self.native.view.msgSend(void, "setFrameSize:", .{bridge.Size{ .width = 260, .height = 150 }});
+                try t.expectEqualDeep(before, self.surface.metrics());
+                try t.expectError(error.SurfaceChangedDuringFrame, self.surface.draw(self.scene));
+                return;
+            }
+            if (self.fail) {
+                self.fail = false;
+                return error.InjectedFrameFailure;
+            }
+            try self.surface.draw(self.scene);
+        }
+        fn resize(ptr: *anyopaque, metrics_value: p.Metrics) void {
+            const self = cast(ptr);
+            self.resizes += 1;
+            self.latest = metrics_value;
+            // Metrics and drawable dimensions are already current when delivered.
+            if (!std.meta.eql(metrics_value, self.surface.metrics())) self.failure = error.StaleResizeMetrics;
+            const pixels = self.native.renderer.layer.msgSend(bridge.Size, "drawableSize", .{});
+            if (pixels.width != @ceil(@as(f64, metrics_value.size.width) * metrics_value.scale) or pixels.height != @ceil(@as(f64, metrics_value.size.height) * metrics_value.scale)) self.failure = error.StaleDrawableSize;
+        }
+        fn inputEvent(_: *anyopaque, _: input.PlatformInput) input.DispatchEventResult {
+            return .{};
+        }
+    };
+    var capture = Capture{ .surface = surface, .native = native, .scene = &scene };
+    surface.setCallbacks(.{ .context = &capture, .request_frame = Capture.frame, .resize = Capture.resize, .input = Capture.inputEvent });
+    defer surface.setCallbacks(null);
+    try t.expectEqual(native.renderer.layer.value, native.view.msgSend(objc.Object, "layer", .{}).value);
+    try t.expectEqual(native.view.value, native.renderer.layer.msgSend(objc.Object, "delegate", .{}).value);
+    try t.expectEqual(@as(usize, 2), native.view.msgSend(usize, "layerContentsRedrawPolicy", .{}));
+    native.serviceFrame();
+    try t.expect(capture.frames > 0 and capture.transactional > 0);
+    try t.expect(capture.failure == null);
+    try t.expect(!native.renderer.presents_with_transaction);
+    for ([_]bridge.Size{ .{ .width = 220, .height = 140 }, .{ .width = 180, .height = 160 }, .{ .width = 240, .height = 130 } }) |size| {
+        const resize_count = capture.resizes;
+        native.window.msgSend(void, "setContentSize:", .{size});
+        try t.expect(capture.resizes > resize_count);
+        try t.expectEqual(@as(f32, @floatCast(size.width)), surface.metrics().size.width);
+        try t.expectEqual(@as(f32, @floatCast(size.height)), capture.latest.?.size.height);
+        native.serviceFrame();
+        try t.expect(capture.failure == null);
+        try t.expect(!native.renderer.presents_with_transaction);
+        const bounds = native.renderer.layer.msgSend(bridge.Rect, "bounds", .{});
+        try t.expectEqual(size.width, bounds.size.width);
+    }
+    // Same-size assignments must not deliver duplicate resize callbacks.
+    const resize_count = capture.resizes;
+    native.view.msgSend(void, "setFrameSize:", .{bridge.Size{ .width = 240, .height = 130 }});
+    try t.expectEqual(resize_count, capture.resizes);
+    capture.reenter = true;
+    surface.requestFrame();
+    native.serviceFrame();
+    try t.expect(capture.failure == null and native.layer_pending);
+    native.serviceFrame();
+    try t.expect(capture.failure == null and !native.renderer.presents_with_transaction);
+    capture.resize_in_frame = true;
+    surface.requestFrame();
+    native.serviceFrame();
+    try t.expect(capture.failure == null and native.layer_pending);
+    native.serviceFrame();
+    try t.expectEqual(@as(f32, 260), surface.metrics().size.width);
+    try t.expect(capture.failure == null);
+    capture.fail = true;
+    surface.requestFrame();
+    native.serviceFrame();
+    try t.expectEqual(error.InjectedFrameFailure, capture.failure.?);
+    try t.expect(!native.renderer.presents_with_transaction and native.callback_depth == 0 and !native.drawing);
+    capture.failure = null;
+    native.view.msgSend(void, "viewDidChangeBackingProperties", .{});
+    try t.expect(native.renderer.layer.msgSend(bool, "needsDisplay", .{}));
+    native.serviceFrame();
+    try t.expect(capture.failure == null);
+    native.window.msgSend(void, "close", .{});
+    const frames = capture.frames;
+    native.view.msgSend(void, "displayLayer:", .{native.renderer.layer});
+    try t.expectEqual(frames, capture.frames);
 }
 
 test "native windows isolate input, resize, render and survive independent close" {
@@ -605,10 +877,13 @@ test "native windows isolate input, resize, render and survive independent close
     try scene.border(t.allocator, .{ .bounds = .{ .size = .{ .width = 100, .height = 100 } }, .widths = .{ .left = 2, .top = 3, .right = 1, .bottom = 4 }, .color = .{ .g = 1, .a = 0.5 }, .clip = .{ .size = .{ .width = 100, .height = 100 } } });
     try first.draw(&scene);
     try second.draw(&scene);
-    try wa.renderer.resize(first.metrics().size, 2);
-    try t.expectEqual(@as(f64, 480), wa.renderer.layer.msgSend(bridge.Size, "drawableSize", .{}).width);
-    try first.draw(&scene);
-    try wa.renderer.resize(first.metrics().size, first.metrics().scale);
+    // Synthetic backing scales belong to an unattached test surface; AppKit
+    // owns the scale of an NSView-backed layer.
+    var retina = try Metal.init(t.allocator, first.metrics().size, 2);
+    defer retina.deinit();
+    try t.expectEqual(@as(f64, 480), retina.layer.msgSend(bridge.Size, "drawableSize", .{}).width);
+    const retina_pixels = try retina.readPixelsForTest(&scene, t.allocator);
+    t.allocator.free(retina_pixels);
     const click_location = wa.view.msgSend(bridge.Point, "convertPoint:toView:", .{ bridge.Point{ .x = 25, .y = 30 }, @as(c.id, null) });
     const click = objc.getClass("NSEvent").?.msgSend(objc.Object, "mouseEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:clickCount:pressure:", .{
         @as(usize, 1), click_location, @as(usize, 1 << 17), @as(f64, 0), wa.window.msgSend(isize, "windowNumber", .{}), @as(c.id, null), @as(isize, 1), @as(isize, 2), @as(f32, 1),

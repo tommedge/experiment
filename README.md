@@ -488,8 +488,21 @@ others running; closing the last returns from `run`. `quit` also returns normall
 allowing Zig `defer` cleanup. Create and use the platform on the main thread.
 
 App wakeups post coalesced AppKit events. Each event-loop turn checks reactive
-dependencies, so idle windows do not submit GPU work. Live-resize callbacks draw
-inside AppKit's nested resize loop; logical size and backing scale update together.
+dependencies, so idle windows do not submit GPU work. The native view supplies
+its Metal layer through `makeBackingLayer` and uses AppKit's
+`NSViewLayerContentsRedrawDuringViewResize` policy. `setFrameSize:` updates logical
+size, backing scale and drawable dimensions before notifying the framework;
+backing-property changes use the same synchronization path.
+
+Geometry changes request a layer redraw rather than presenting directly from
+`windowDidResize:`. AppKit's `displayLayer:` callback rebuilds the frame with
+`presentsWithTransaction` enabled, pairing the new drawable with the layer's new
+bounds in the same Core Animation transaction, including during the nested live-
+resize loop. Drawable-size updates disable implicit layer animations. Normal
+model updates still use dependency-based redraws. Reentrant display/resize
+requests are deferred to the next UI-loop turn, and the presentation mode is
+restored even when a frame fails. Unexpected drawable-size mismatches are rejected
+instead of presenting a frame at the wrong resolution.
 Draw failures remain visible in `NativeWindow.last_error`, preserve dirty state,
 and retry on the next event/frame request. Explicit `NativeWindow.invalidate()`
 marks the content dirty and wakes the loop.
@@ -599,7 +612,7 @@ backend substitution/failure, and allocation-failure cleanup.
 Opt-in native tests additionally create two independent Metal windows, render
 clipped/translucent scenes, resize, dispatch Unicode text/composition and synthetic
 AppKit key events, run the real event loop, verify independent close/teardown, and
-dispatch a native keybinding through a focused listener in a reused cached subtree.
+dispatch a native keybinding across cached and layer-driven redraws.
 Text tests cover UTF-8 run validation, wrapping, measurement, inherited-style cache
 invalidation, retained line/glyph ownership, failure rollback and atlas packing.
 Native tests cover CoreText fallback, RTL/grapheme indexes, bitmap orientation,
@@ -611,3 +624,6 @@ Rounded-border tests exercise per-corner metadata, radius changes through cached
 views and unchanged layout. Native tests read back pixels from the production
 Metal rendering path to check corner cutouts, antialiasing, translucent composition,
 asymmetric inner ellipses, missing/thick sides and clip correctness at 1× and 2×.
+Native resize tests additionally verify immediate size notification, matching
+drawable dimensions, transactional display, reentrant-request deferral, failure
+cleanup and ignored display callbacks after window close.

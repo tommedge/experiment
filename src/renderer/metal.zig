@@ -48,6 +48,8 @@ pub const Metal = struct {
     textures: std.ArrayList(objc.Object) = .empty,
     sampler: objc.Object,
     white: objc.Object,
+    /// Layer-driven redraws present in the same CA transaction as geometry changes.
+    presents_with_transaction: bool = false,
 
     pub fn init(a: std.mem.Allocator, size: g.Size, scale: f32) !Metal {
         const device = try checked(bridge.object(MTLCreateSystemDefaultDevice()));
@@ -81,6 +83,8 @@ pub const Metal = struct {
         layer.msgSend(void, "setFramebufferOnly:", .{true});
         layer.msgSend(void, "setOpaque:", .{true});
         layer.msgSend(void, "setAllowsNextDrawableTimeout:", .{true});
+        layer.msgSend(void, "setPresentsWithTransaction:", .{false});
+        layer.msgSend(void, "setNeedsDisplayOnBoundsChange:", .{true});
         const sampler_descriptor = bridge.new("MTLSamplerDescriptor");
         defer sampler_descriptor.release();
         sampler_descriptor.msgSend(void, "setMinFilter:", .{@as(usize, 1)});
@@ -110,8 +114,16 @@ pub const Metal = struct {
     pub fn resize(self: *Metal, size: g.Size, scale: f32) !void {
         self.size = size;
         self.scale = scale;
+        const transaction = objc.getClass("CATransaction").?;
+        transaction.msgSend(void, "begin", .{});
+        defer transaction.msgSend(void, "commit", .{});
+        transaction.msgSend(void, "setDisableActions:", .{true});
         self.layer.msgSend(void, "setContentsScale:", .{@as(f64, scale)});
         self.layer.msgSend(void, "setDrawableSize:", .{bridge.Size{ .width = @ceil(@as(f64, size.width) * scale), .height = @ceil(@as(f64, size.height) * scale) }});
+    }
+    pub fn setPresentsWithTransaction(self: *Metal, enabled: bool) void {
+        self.presents_with_transaction = enabled;
+        self.layer.msgSend(void, "setPresentsWithTransaction:", .{enabled});
     }
     pub fn submit(self: *Metal, scene: *const Scene) !void {
         if (self.size.width <= 0 or self.size.height <= 0) return error.SurfaceUnavailable;
@@ -119,7 +131,14 @@ pub const Metal = struct {
         defer pool.deinit();
         const drawable = self.layer.msgSend(objc.Object, "nextDrawable", .{});
         if (drawable.value == null) return error.SurfaceUnavailable;
-        try self.renderTexture(scene, drawable.msgSend(objc.Object, "texture", .{}), .{ .r = 0.025, .g = 0.025, .b = 0.03, .a = 1 });
+        const texture = drawable.msgSend(objc.Object, "texture", .{});
+        const width: usize = @intFromFloat(@ceil(@as(f64, self.size.width) * self.scale));
+        const height: usize = @intFromFloat(@ceil(@as(f64, self.size.height) * self.scale));
+        if (texture.msgSend(usize, "width", .{}) != width or texture.msgSend(usize, "height", .{}) != height) return error.DrawableSizeMismatch;
+        try self.renderTexture(scene, texture, .{ .r = 0.025, .g = 0.025, .b = 0.03, .a = 1 });
+        // renderTexture waits for completion to preserve the failure contract.
+        // With presentsWithTransaction enabled, present joins CA's current
+        // geometry transaction rather than displaying against stale layer bounds.
         drawable.msgSend(void, "present", .{});
     }
     fn renderTexture(self: *Metal, scene: *const Scene, target_texture: objc.Object, clear: ClearColor) !void {
