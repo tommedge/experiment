@@ -1,10 +1,22 @@
 const std = @import("std");
 const ui = @import("zigui");
+const CursorChanged = struct { position: ?ui.geometry.Point };
 const Counter = struct {
     value: u32 = 1,
+    cursor: ?ui.geometry.Point = null,
     pub fn render(self: *const Counter, f: *ui.Frame, _: *ui.Context(Counter)) !ui.AnyElement {
-        const bar = try f.div(.{ .id = 1, .style = .{ .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 40 }, .height = .{ .px = 60 }, .background = .{ .r = 0.1, .g = 0.5, .b = 0.9 } } });
-        return f.div(.{ .style = .{ .padding = .{ .left = 24, .top = 24 }, .clip = true }, .children = &.{bar} });
+        const position = self.cursor orelse ui.geometry.Point{ .x = 24, .y = 24 };
+        const bar = try f.div(.{ .id = 1, .style = .{ .absolute = true, .left = position.x, .top = position.y, .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 40 }, .height = .{ .px = 60 }, .background = .{ .r = 0.1, .g = 0.5, .b = 0.9 } } });
+        return f.div(.{ .style = .{ .clip = true }, .children = &.{bar} });
+    }
+    fn trackCursor(_: *Counter, cx: *ui.Context(Counter)) !void {
+        var subscription = try cx.subscribe(cx.entity, CursorChanged, void, {}, cursorChanged);
+        subscription.detach();
+    }
+    fn cursorChanged(self: *Counter, _: ui.Entity(Counter), event: *const CursorChanged, _: *void, cx: *ui.Context(Counter)) void {
+        if (std.meta.eql(self.cursor, event.position)) return;
+        self.cursor = event.position;
+        cx.notify() catch |err| std.log.err("cursor update: {s}", .{@errorName(err)});
     }
     fn increment(self: *Counter, cx: *ui.Context(Counter)) !void {
         self.value = self.value % 12 + 1;
@@ -16,6 +28,9 @@ const Controller = struct {
     platform: *ui.Platform,
     fn dispatch(ptr: *anyopaque, event: ui.input.PlatformInput, target: ?u64) ui.input.DispatchEventResult {
         const self: *Controller = @ptrCast(@alignCast(ptr));
+        if (event == .mouse_exit or event.position() != null) {
+            self.counter.app.emit(self.counter, CursorChanged{ .position = if (event == .mouse_exit) null else event.position() }) catch |err| std.log.err("cursor event: {s}", .{@errorName(err)});
+        }
         const increment = switch (event) {
             .mouse_down => |e| target == 1 and e.button == .left,
             .key_down => |e| blk: {
@@ -39,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
     app.wakeup = .{ .context = &platform, .schedule = ui.Platform.schedule };
     defer app.wakeup = null;
     const counter = try app.create(Counter{});
+    try counter.update(Counter.trackCursor);
     const window = try ui.NativeWindow.create(&app, platform, counter, .{ .title = "zigui — click the bar or press Space" });
     defer window.destroy();
     var controller = Controller{ .counter = counter, .platform = &platform };
