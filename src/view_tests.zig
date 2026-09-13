@@ -2,6 +2,7 @@ const std = @import("std");
 const t = std.testing;
 const ui = @import("root.zig");
 
+/// Small reactive model shared by test views to exercise entity-read invalidation.
 const Data = struct {
     value: u32 = 10,
     fn bump(self: *Data, cx: *ui.Context(Data)) !void {
@@ -13,8 +14,12 @@ const Data = struct {
         try cx.notify();
     }
 };
+/// Out-of-band counters proving which subtree phases and handlers actually ran.
 const Counts = struct { render: usize = 0, layout: usize = 0, prepaint: usize = 0, paint: usize = 0, actions: usize = 0 };
+/// Action with a payload, verifying typed dispatch preserves the requested amount.
 const Increment = struct { amount: u32 = 1 };
+/// Instrumented view that reads data, registers focus/actions and renders through
+/// Probe so tests can distinguish a full rebuild from cached output replay.
 const Leaf = struct {
     data: ui.Entity(Data),
     counts: *Counts,
@@ -50,6 +55,8 @@ const Leaf = struct {
         ec.stopPropagation();
     }
 };
+/// Custom element that counts each phase and optionally reads another entity
+/// outside render, exercising dependency tracking throughout the lifecycle.
 const Probe = struct {
     pub const RequestLayoutState = void;
     pub const PrepaintState = void;
@@ -72,6 +79,7 @@ const Probe = struct {
         try self.child.paint(f);
     }
 };
+/// Two-sibling test host with switches for caching, visibility and positioning.
 const Root = struct {
     a: ui.Entity(Leaf),
     b: ui.Entity(Leaf),
@@ -180,6 +188,7 @@ test "shared data invalidates every reader and independent window; phase reads a
     try t.expectEqual(@as(usize, 4), b.render);
 }
 
+/// Intermediate view containing a cached leaf, used to exercise nested caches.
 const Group = struct {
     leaf: ui.Entity(Leaf),
     renders: *usize,
@@ -189,6 +198,8 @@ const Group = struct {
         return f.div(.{ .style = .{ .padding = .{ .left = 3, .top = 4 } }, .children = &.{child} });
     }
 };
+/// Places a cached group beside a cached leaf so replay must preserve both
+/// descendant metadata and the scene/hitbox offsets of an unrelated sibling.
 const Nested = struct {
     group: ui.Entity(Group),
     leaf: ui.Entity(Leaf),
@@ -272,6 +283,7 @@ test "geometry, clipping, scale and explicit refresh invalidate cached output" {
     try t.expectEqualDeep(expected, window.renderer.backend.scene.primitives.items);
 }
 
+/// Stub-backed renderer with an injected submission failure for rollback tests.
 const Failing = struct {
     stub: ui.renderer.Stub,
     fail: bool = false,
@@ -343,6 +355,8 @@ test "allocation failure releases cached snapshots, copied metadata and owned ca
     try t.checkAllAllocationFailures(t.allocator, allocationScenario, .{});
 }
 
+/// Minimal data-reading quad view without focus, suitable for layout comparisons
+/// and rendering the same entity at multiple keyed positions.
 const Simple = struct {
     data: ui.Entity(Data),
     renders: *usize,
@@ -353,6 +367,7 @@ const Simple = struct {
     }
 };
 test "cached and ordinary boundaries agree on padding, clipping, order and hitboxes" {
+    // Renders equivalent cached/ordinary boundaries while varying inherited clipping.
     const Compare = struct {
         leaf: ui.Entity(Simple),
         cached: bool,
@@ -394,6 +409,7 @@ test "cached and ordinary boundaries agree on padding, clipping, order and hitbo
 }
 
 test "keyed repeated entities have separate occurrences and ambiguous identities fail transactionally" {
+    // Produces two occurrences of one entity, optionally colliding their keys.
     const Repeated = struct {
         leaf: ui.Entity(Simple),
         duplicate: bool = false,
@@ -432,6 +448,7 @@ test "keyed repeated entities have separate occurrences and ambiguous identities
 }
 
 test "recursive view containment is rejected before unbounded rendering" {
+    // Deliberately nests itself to verify containment-cycle detection.
     const Recursive = struct {
         pub fn render(_: *const @This(), f: *ui.Frame, cx: *ui.Context(@This())) !ui.AnyElement {
             return f.view(cx.entity);
@@ -447,6 +464,7 @@ test "recursive view containment is rejected before unbounded rendering" {
 }
 
 test "display-none view branches drop data readers and dispatch nodes" {
+    // Toggles display-none on a container to check its child readers are dropped.
     const Hidden = struct {
         child: ui.Entity(Simple),
         hidden: bool = false,
@@ -477,6 +495,7 @@ test "display-none view branches drop data readers and dispatch nodes" {
 }
 
 test "explicit invalidation during render survives successful commit" {
+    // Invalidates its own window once during render to test pending-refresh preservation.
     const Refresh = struct {
         window: *?*ui.Window,
         once: *bool,
@@ -528,6 +547,7 @@ test "nested replay allocation failures release descendant snapshots and shared 
 }
 
 test "a custom element may prepaint an unpainted cached child without retaining an invalid paint range" {
+    // Prepaints a child but omits its paint call, leaving no reusable child paint range.
     const SkipPaint = struct {
         pub const RequestLayoutState = void;
         pub const PrepaintState = void;
@@ -540,12 +560,14 @@ test "a custom element may prepaint an unpainted cached child without retaining 
         }
         pub fn paint(_: *@This(), _: *ui.Frame, _: ui.geometry.Bounds, _: *void, _: *void) !void {}
     };
+    // Places a cached leaf behind SkipPaint to exercise incomplete cache state.
     const Parent = struct {
         leaf: ui.Entity(Simple),
         pub fn render(self: *const @This(), f: *ui.Frame, _: *ui.Context(@This())) !ui.AnyElement {
             return f.element(SkipPaint{ .child = try f.cachedView(self.leaf, .{ .style = .{ .width = .{ .px = 50 }, .height = .{ .px = 40 } } }) });
         }
     };
+    // Adds scene output before a cached parent, exposing invalid range rebasing.
     const Outer = struct {
         child: ui.Entity(Parent),
         pub fn render(self: *const @This(), f: *ui.Frame, _: *ui.Context(@This())) !ui.AnyElement {

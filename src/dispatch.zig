@@ -3,6 +3,8 @@ const reactive = @import("app.zig");
 const input = @import("input.zig");
 
 pub const Phase = enum { capture, bubble };
+/// App-scoped identity for a focusable element. Unlike a dispatch node ID, this
+/// handle survives frame rebuilds; each frame maps it to the current node.
 pub const FocusHandle = struct { app: *reactive.App, id: u64 };
 pub const NodeId = usize;
 
@@ -18,6 +20,8 @@ pub const Payload = struct {
 
     pub fn create(a: std.mem.Allocator, value: anytype) !*Payload {
         const T = @TypeOf(value);
+        // Keeps the erased ownership header and concrete capture in one allocation,
+        // so the final release can run T.deinit and free the correct allocation.
         const Box = struct {
             header: Payload,
             value: T,
@@ -44,6 +48,9 @@ pub const Payload = struct {
     }
 };
 
+/// Mutable state shared by listeners for one dispatch. Borrows the committed
+/// tree and window focus, and records whether delivery was handled or stopped.
+/// Listeners must not retain this context after their callback returns.
 pub const EventContext = struct {
     app: *reactive.App,
     focused: *?u64,
@@ -67,17 +74,25 @@ pub const EventContext = struct {
     }
 };
 
+/// Type-erased callback registration. A null action_type selects raw input;
+/// otherwise only that action type is delivered. The snapshot owns the capture
+/// reference, allowing this descriptor to be copied when a subtree is replayed.
 pub const Listener = struct {
     capture: *Payload,
     action_type: ?[]const u8 = null,
     invoke: *const fn (*anyopaque, ?input.PlatformInput, ?*const anyopaque, Phase, *EventContext) anyerror!void,
 };
+/// Maps a key/modifier combination to a retained typed action, optionally gated
+/// by a named context on the target path. Strings and payload belong to snapshots.
 pub const Binding = struct {
     key: []const u8,
     modifiers: input.Modifiers = .{},
     context: ?[]const u8 = null,
     action: *Payload,
 };
+/// One element's input-routing scope in a frame. Parent links define capture and
+/// bubble paths; view indexes mark entity boundaries for ancestry and cache replay.
+/// Optional focus, context and text-provider metadata enrich that routing scope.
 pub const Node = struct {
     parent: ?NodeId,
     view: ?usize = null,
@@ -87,8 +102,13 @@ pub const Node = struct {
     bindings: std.ArrayList(Binding) = .empty,
     text_input: ?TextInput = null,
 };
+/// Couples the portable text-query interface with its retained context storage,
+/// keeping the handler's context pointer valid across cached frame reuse.
 pub const TextInput = struct { capture: *Payload, handler: input.TextInputHandler };
 
+/// Snapshot-owned dispatch hierarchy and focus lookup index. Nodes are rebuilt
+/// or grafted from caches each frame, then used unchanged while routing input.
+/// Node IDs are local to this tree and must be remapped during subtree replay.
 pub const Tree = struct {
     nodes: std.ArrayList(Node) = .empty,
     focus_nodes: std.AutoHashMapUnmanaged(u64, NodeId) = .empty,
@@ -137,6 +157,8 @@ pub const Tree = struct {
         if (cx.handled or cx.stopped) return;
         if (event == .key_down) {
             const key = event.key_down;
+            // A matching binding plus its precedence: deepest context first,
+            // then deepest owning node, then latest registration.
             const Candidate = struct {
                 binding: Binding,
                 context_depth: usize,

@@ -425,7 +425,10 @@ test "macOS modifier flags and scroll phases" {
 
 test "native key binding reaches a focused listener retained by cached subtree replay" {
     const ui = @import("../root.zig");
+    // Action used to verify that an AppKit key reaches a retained typed listener.
     const Increment = struct {};
+    // Native test view that counts renders and quits the event loop after its
+    // focused action updates entity state, allowing the test to inspect results.
     const Counter = struct {
         platform: p.Platform,
         focus: ui.FocusHandle,
@@ -450,6 +453,8 @@ test "native key binding reaches a focused listener retained by cached subtree r
             self.platform.quit();
         }
     };
+    // Cached boundary host whose notification forces a frame without dirtying
+    // the counter, ensuring native input is tested against replayed handlers.
     const Root = struct {
         child: ui.Entity(Counter),
         pub fn render(self: *const @This(), f: *ui.Frame, _: *ui.Context(@This())) !ui.AnyElement {

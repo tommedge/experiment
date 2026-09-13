@@ -6,10 +6,14 @@ const layout = @import("layout.zig");
 const g = @import("geometry.zig");
 const state = @import("view_state.zig");
 
+/// Opt-in cache boundary configuration. The style supplies outer layout without
+/// measuring cached contents; key disambiguates repeated sibling entity views.
 pub const CachedViewOptions = struct { style: layout.Style, key: u64 = 0 };
 
 pub fn create(f: *Frame, entity: anytype, key: u64, style: ?layout.Style) !elements.AnyElement {
     if (entity.app != f.app) return error.WrongApp;
+    // Recovers the concrete entity type behind ViewElement's erased render
+    // function, reading it through the normal dependency-tracking API.
     const Adapter = struct {
         fn render(frame: *Frame, id: reactive.EntityId) !elements.AnyElement {
             const handle = @TypeOf(entity){ .app = frame.app, .id = id };
@@ -21,6 +25,10 @@ pub fn create(f: *Frame, entity: anytype, key: u64, style: ?layout.Style) !eleme
     return f.element(ViewElement{ .entity = entity.id, .key = key, .style = style, .render = Adapter.render });
 }
 
+/// Temporary element that establishes an owning view scope around every phase.
+/// Ordinary views render during layout requests; cached views first lay out an
+/// outer boundary, then render or replay their contents once bounds are known.
+/// Persistent cache metadata lives in Snapshot, not in this frame-arena value.
 const ViewElement = struct {
     pub const RequestLayoutState = ?elements.AnyElement;
     pub const PrepaintState = g.Bounds;

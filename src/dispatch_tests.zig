@@ -1,7 +1,9 @@
 const std = @import("std");
 const t = std.testing;
 const ui = @import("root.zig");
+/// Test action whose value identifies which contextual binding won resolution.
 const Choose = struct { value: u32 };
+/// Shared observations and controls for propagation, reentrancy and capture cleanup.
 const Log = struct {
     calls: [64]u8 = undefined,
     len: usize = 0,
@@ -17,6 +19,7 @@ const Log = struct {
         self.handle_only = false;
     }
 };
+/// Owned listener state that records its node label and counts its final release.
 const Capture = struct {
     log: *Log,
     label: u8,
@@ -39,6 +42,8 @@ const Capture = struct {
         cx.stopPropagation();
     }
 };
+/// Three-level input hierarchy with nested contexts, a focused target and
+/// competing bindings, making dispatch order and precedence observable.
 const Routing = struct {
     log: *Log,
     focus: ui.FocusHandle,
@@ -65,6 +70,7 @@ const Routing = struct {
         });
     }
 };
+/// Cached-view host that can trigger replay or remove the routing subtree entirely.
 const Host = struct {
     child: ui.Entity(Routing),
     show: bool = true,
@@ -130,6 +136,8 @@ test "focused capture and bubble dispatch, context precedence, typed actions and
     try t.expectEqual(log.created, log.destroyed);
 }
 
+/// Self-contained text-provider capture; inline storage lets lifetime tests query
+/// it safely after the frame that originally registered it has been discarded.
 const TextCapture = struct {
     value: [4]u8 = .{ 't', 'e', 's', 't' },
     pub fn selectedRange(_: *TextCapture) ?ui.input.TextRange {
@@ -150,12 +158,14 @@ const TextCapture = struct {
     }
 };
 test "focused text provider capture survives cache hits and clears with its focus node" {
+    // Registers the owned text provider on a focusable node.
     const TextView = struct {
         focus: ui.FocusHandle,
         pub fn render(self: *const @This(), f: *ui.Frame, _: *ui.Context(@This())) !ui.AnyElement {
             return f.div(.{ .focus = self.focus, .text_input = try f.textInputHandler(TextCapture{}, TextCapture) });
         }
     };
+    // Reuses or removes the text view to exercise provider retention and clearing.
     const TextHost = struct {
         child: ui.Entity(TextView),
         show: bool = true,

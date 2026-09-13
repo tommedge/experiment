@@ -140,6 +140,8 @@ pub const Frame = struct {
     pub fn textInputHandler(self: *Frame, capture: anytype, comptime Adapter: type) !dispatch.TextInput {
         const C = @TypeOf(capture);
         const I = @import("input.zig");
+        // Bridges the erased text-provider callbacks back to the concrete
+        // capture and adapter methods without exposing native platform types.
         const Wrapper = struct {
             fn cast(ptr: *anyopaque) *C {
                 return @ptrCast(@alignCast(ptr));
@@ -165,6 +167,7 @@ pub const Frame = struct {
     }
     pub fn inputListener(self: *Frame, capture: anytype, comptime callback: anytype) !dispatch.Listener {
         const C = @TypeOf(capture);
+        // Restores the capture type when the dispatch tree invokes a raw-input listener.
         const Adapter = struct {
             fn invoke(ptr: *anyopaque, event: ?@import("input.zig").PlatformInput, _: ?*const anyopaque, phase: dispatch.Phase, cx: *dispatch.EventContext) !void {
                 try callback(@as(*C, @ptrCast(@alignCast(ptr))), event.?, phase, cx);
@@ -175,6 +178,7 @@ pub const Frame = struct {
     }
     pub fn actionListener(self: *Frame, comptime Action: type, capture: anytype, comptime callback: anytype) !dispatch.Listener {
         const C = @TypeOf(capture);
+        // Restores both capture and action types after dispatch has matched the action tag.
         const Adapter = struct {
             fn invoke(ptr: *anyopaque, _: ?@import("input.zig").PlatformInput, action: ?*const anyopaque, phase: dispatch.Phase, cx: *dispatch.EventContext) !void {
                 try callback(@as(*C, @ptrCast(@alignCast(ptr))), @as(*const Action, @ptrCast(@alignCast(action.?))), phase, cx);
@@ -185,6 +189,8 @@ pub const Frame = struct {
     }
     pub fn entityInputListener(self: *Frame, entity: anytype, comptime callback: anytype) !dispatch.Listener {
         const Weak = @TypeOf(entity.downgrade());
+        // Upgrades the weak recipient and delivers input inside its normal
+        // mutable entity-update boundary; released recipients are skipped.
         const Adapter = struct {
             fn call(weak: *Weak, event: @import("input.zig").PlatformInput, phase: dispatch.Phase, cx: *dispatch.EventContext) !void {
                 const handle = weak.upgrade() orelse return;
@@ -198,6 +204,8 @@ pub const Frame = struct {
     }
     pub fn entityActionListener(self: *Frame, entity: anytype, comptime Action: type, comptime callback: anytype) !dispatch.Listener {
         const Weak = @TypeOf(entity.downgrade());
+        // Delivers a typed action through a weak entity handle, preserving borrow
+        // checks and deferred-effect flushing without retaining the view entity.
         const Adapter = struct {
             fn call(weak: *Weak, action: *const Action, phase: dispatch.Phase, cx: *dispatch.EventContext) !void {
                 const handle = weak.upgrade() orelse return;

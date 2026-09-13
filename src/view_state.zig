@@ -5,8 +5,14 @@ const dispatch = @import("dispatch.zig");
 const layout = @import("layout.zig");
 const Primitive = @import("scene.zig").Primitive;
 
+/// Clipped pointer target: id is application-defined, while node links the hit
+/// to the containing snapshot's dispatch tree for capture/bubble routing.
 pub const Hitbox = struct { id: u64, bounds: g.Bounds, node: ?dispatch.NodeId = null };
+/// Half-open index interval [start, end) into one snapshot output array.
+/// Replay rebases these intervals rather than retaining old array pointers.
 pub const Range = struct { start: usize, end: usize };
+/// Geometry and rendering inputs that must match before cached output can be
+/// reused. Entity dependencies and explicit refresh are checked separately.
 pub const CacheKey = struct {
     bounds: g.Bounds,
     clip: g.Bounds,
@@ -14,8 +20,15 @@ pub const CacheKey = struct {
     scale: f32,
     style: layout.Style,
 };
+/// A view subtree's reusable output ranges and their validity key. Node ranges
+/// exclude the boundary node, which is recreated on replay. painted distinguishes
+/// a complete cache from a child that was prepainted but never painted.
 pub const Cache = struct { key: CacheKey, nodes: Range, hitboxes: Range, scene: Range, painted: bool = false };
 pub const DirtyReason = enum { clean, new_view, dependency, ancestor, refresh, geometry };
+/// Metadata for one occurrence of an entity-backed view, not the entity itself.
+/// Parent path, entity and key identify the occurrence; dependencies record its
+/// direct reads. previous links to its match in the preceding frame while building
+/// a candidate, and cache/reused describe the output selected for this frame.
 pub const View = struct {
     entity: app.EntityId,
     key: u64,

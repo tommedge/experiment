@@ -132,6 +132,8 @@ pub const App = struct {
     depth: usize = 0,
     flushing: bool = false,
     tracking: ?*std.ArrayList(Dependency) = null,
+    /// Scoped bridge to the active frame's per-view dependency recorder. The
+    /// erased context is borrowed only while the frame's traversal is active.
     view_tracking: ?struct { context: *anyopaque, record: *const fn (*anyopaque, Dependency) anyerror!void } = null,
     next_focus: u64 = 1,
     wakeup: ?Wakeup = null,

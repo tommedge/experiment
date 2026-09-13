@@ -1,9 +1,14 @@
 const std = @import("std");
 const ui = @import("zigui");
+/// Subscription event carrying the latest pointer position, or null on exit.
 const CursorChanged = struct { position: ?ui.geometry.Point };
+/// Focused action that grows the cursor-following quad.
 const Increment = struct {};
+/// Workspace action that changes the shared palette used by both cached views.
 const TogglePalette = struct {};
+/// External instrumentation for observing renders without adding reactive dependencies.
 const Stats = struct { counter: usize = 0, sidebar: usize = 0 };
+/// Shared reactive color choice: notifying this entity invalidates both readers.
 const Palette = struct {
     warm: bool = false,
     fn toggle(self: *Palette, cx: *ui.Context(Palette)) !void {
@@ -11,6 +16,8 @@ const Palette = struct {
         try cx.notify();
     }
 };
+/// Interactive cached view whose own state tracks the quad's size and position.
+/// It reads the shared palette and owns the focused increment/input handlers.
 const Counter = struct {
     value: u32 = 1,
     cursor: ?ui.geometry.Point = null,
@@ -57,6 +64,7 @@ const Counter = struct {
         ec.stopPropagation();
     }
 };
+/// Cached sibling that reads only the palette, so pointer movement can reuse it.
 const Sidebar = struct {
     palette: ui.Entity(Palette),
     stats: *Stats,
@@ -66,6 +74,8 @@ const Sidebar = struct {
         return f.div(.{ .id = 2, .style = .{ .width = .{ .percent = 100 }, .height = .{ .percent = 100 }, .background = if (palette.warm) .{ .r = 0.3, .g = 0.08, .b = 0.02 } else .{ .r = 0.02, .g = 0.15, .b = 0.3 } } });
     }
 };
+/// Uncached parent that arranges the two cache boundaries and handles the shared
+/// palette action as it bubbles up from the focused counter.
 const Workspace = struct {
     counter: ui.Entity(Counter),
     sidebar: ui.Entity(Sidebar),
@@ -86,6 +96,8 @@ const Workspace = struct {
         ec.stopPropagation();
     }
 };
+/// Window-level fallback for unhandled pointer updates and application shortcuts.
+/// It feeds cursor events into the counter's subscription independently of focus.
 const Controller = struct {
     counter: ui.Entity(Counter),
     platform: *ui.Platform,
