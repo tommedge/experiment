@@ -423,6 +423,75 @@ test "macOS modifier flags and scroll phases" {
     try std.testing.expectEqual(input.ScrollPhase.ended, phase(8));
 }
 
+test "native key binding reaches a focused listener retained by cached subtree replay" {
+    const ui = @import("../root.zig");
+    const Increment = struct {};
+    const Counter = struct {
+        platform: p.Platform,
+        focus: ui.FocusHandle,
+        renders: *usize,
+        value: u32 = 1,
+        pub fn render(self: *const @This(), f: *ui.Frame, cx: *ui.Context(@This())) !ui.AnyElement {
+            self.renders.* += 1;
+            return f.div(.{
+                .focus = self.focus,
+                .key_context = "Counter",
+                .id = 1,
+                .listeners = &.{try f.entityActionListener(cx.entity, Increment, increment)},
+                .bindings = &.{try f.bindKey("space", .{}, "Counter", Increment{})},
+                .style = .{ .width = .{ .px = @as(f32, @floatFromInt(self.value)) * 10 }, .height = .{ .px = 20 }, .background = .{ .r = 0.7 } },
+            });
+        }
+        fn increment(self: *@This(), _: *const Increment, phase_value: ui.DispatchPhase, cx: *ui.Context(@This()), ec: *ui.EventContext) !void {
+            if (phase_value != .bubble) return;
+            self.value += 1;
+            try cx.notify();
+            ec.stopPropagation();
+            self.platform.quit();
+        }
+    };
+    const Root = struct {
+        child: ui.Entity(Counter),
+        pub fn render(self: *const @This(), f: *ui.Frame, _: *ui.Context(@This())) !ui.AnyElement {
+            return f.cachedView(self.child, .{ .style = .{ .width = .{ .px = 100 }, .height = .{ .px = 80 } } });
+        }
+        fn notify(_: *@This(), cx: *ui.Context(@This())) !void {
+            try cx.notify();
+        }
+    };
+    var pool = objc.AutoreleasePool.init();
+    defer pool.deinit();
+    var application = ui.App.init(std.testing.allocator);
+    defer application.deinit();
+    var platform = try create(application.allocator);
+    defer platform.deinit();
+    application.wakeup = .{ .context = &platform, .schedule = p.Platform.schedule };
+    defer application.wakeup = null;
+    const focus_handle = application.newFocusHandle();
+    var renders: usize = 0;
+    const counter = try application.create(Counter{ .platform = platform, .focus = focus_handle, .renders = &renders });
+    const root = try application.create(Root{ .child = counter });
+    const hosted = try ui.NativeWindow.create(&application, platform, root, .{ .title = "zigui cached native dispatch", .size = .{ .width = 200, .height = 100 } });
+    defer hosted.destroy();
+    _ = try hosted.content.drawIfNeeded();
+    try hosted.content.focus(focus_handle);
+    _ = try hosted.content.drawIfNeeded();
+    try root.update(Root.notify);
+    _ = try hosted.content.drawIfNeeded();
+    try std.testing.expectEqual(@as(usize, 2), renders);
+    try std.testing.expectEqual(@as(usize, 1), hosted.content.inspect().?.cache_hits);
+    const native = MacWindow.cast(hosted.surface.ptr);
+    const event = objc.getClass("NSEvent").?.msgSend(objc.Object, "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:", .{
+        @as(usize, 10), bridge.Point{ .x = 0, .y = 0 }, @as(usize, 0), @as(f64, 0), native.window.msgSend(isize, "windowNumber", .{}), @as(c.id, null), bridge.string(" "), bridge.string(" "), false, @as(u16, 49),
+    });
+    MacPlatform.cast(platform.ptr).application.msgSend(void, "postEvent:atStart:", .{ event, true });
+    platform.run();
+    try std.testing.expect(hosted.last_error == null);
+    try std.testing.expectEqual(@as(u32, 2), (try counter.read()).value);
+    _ = try hosted.content.drawIfNeeded();
+    try std.testing.expectEqual(@as(usize, 3), renders);
+}
+
 test "native windows isolate input, resize, render and survive independent close" {
     const t = std.testing;
     var pool = objc.AutoreleasePool.init();

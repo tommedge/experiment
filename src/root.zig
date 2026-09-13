@@ -19,8 +19,16 @@ pub const input = @import("input.zig");
 pub const Platform = platform.Platform;
 pub const PlatformWindow = platform.PlatformWindow;
 pub const NativeWindow = @import("native_window.zig").NativeWindow;
+pub const dispatch = @import("dispatch.zig");
+pub const FocusHandle = dispatch.FocusHandle;
+pub const DispatchPhase = dispatch.Phase;
+pub const EventContext = dispatch.EventContext;
+pub const CachedViewOptions = @import("view.zig").CachedViewOptions;
+pub const view_state = @import("view_state.zig");
 
 test {
     _ = @import("tests.zig");
+    _ = @import("view_tests.zig");
+    _ = @import("dispatch_tests.zig");
     if (@import("build_options").native_tests) _ = @import("platform/macos.zig");
 }

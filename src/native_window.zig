@@ -30,6 +30,7 @@ pub const NativeWindow = struct {
     pub fn destroy(self: *NativeWindow) void {
         const a = self.content.app.allocator;
         self.surface.setCallbacks(null);
+        self.surface.setTextInputHandler(null);
         self.content.deinit();
         self.surface.deinit();
         a.destroy(self);
@@ -43,6 +44,8 @@ pub const NativeWindow = struct {
     }
     fn draw(ptr: *anyopaque, options: p.RequestFrameOptions) void {
         const self = cast(ptr);
+        self.surface.setTextInputHandler(null);
+        defer self.surface.setTextInputHandler(self.content.focusedTextInput());
         if (options.force_render) self.content.invalidate();
         _ = self.content.drawIfNeeded() catch |err| {
             self.last_error = err;
@@ -58,6 +61,12 @@ pub const NativeWindow = struct {
     }
     fn dispatch(ptr: *anyopaque, event: input.PlatformInput) input.DispatchEventResult {
         const self = cast(ptr);
+        defer self.surface.setTextInputHandler(self.content.focusedTextInput());
+        const result = self.content.dispatchInput(event) catch |err| {
+            self.last_error = err;
+            return .{ .handled = true };
+        };
+        if (result.handled) return result;
         const target = if (event.position()) |point| self.content.hitTest(point) else null;
         if (self.on_input) |handler| return handler.dispatch(handler.context, event, target);
         return .{};

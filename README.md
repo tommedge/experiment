@@ -15,8 +15,8 @@ there are no Objective-C or Objective-C++ source files.
 ```sh
 zig build                  # installs zig-out/bin/counter
 zig build run              # headless counter demonstration
-zig build run-desktop      # macOS: click the bar or press Space; Cmd-Q quits
-zig build run-desktop -- --smoke  # create, render two GPU frames, tear down
+zig build run-desktop      # move pointer; Space increments; T changes both colors
+zig build run-desktop -- --smoke  # verify Metal, selective cache reuse and actions
 zig build test --summary all
 zig build test -Dnative-tests=true --summary all # macOS integration; opens windows
 zig build -Dbackend=stub -Doptimize=ReleaseSafe
@@ -65,23 +65,29 @@ Entity(T).update(callback)
 | `src/renderer/metal.zig` | Per-window Metal pipeline, clipped quad upload and presentation |
 | `src/input.zig` | Portable mouse, keyboard, scrolling, composition and text-model contracts |
 | `src/native_window.zig` | Stable-address bridge from platform callbacks to reactive frames |
+| `src/view.zig` | Entity-backed view boundaries and explicit cached-subtree layout/replay |
+| `src/view_state.zig` | Committed snapshots, per-view reads, reader indexes and cache ranges |
+| `src/dispatch.zig` | View-aware input tree, stable focus, typed actions and contextual keybindings |
 
 ### Frame phases
 
-1. **Render:** `T.render(*const T, *Frame, *Context(T))` constructs a fresh element
-   tree from entity state. `Frame.view(entity)` renders a child view. Reads through
-   `App.read` / `Entity.read` automatically record window dependencies.
+1. **View boundaries:** `Frame.view(entity)` constructs an entity-backed boundary.
+   It defers calling `T.render(*const T, *Frame, *Context(T))` until that boundary's
+   layout traversal. Entity reads are recorded against the active view occurrence.
 2. **Request layout:** each element recursively requests its children's layouts,
-   creates its Yoga node and produces `RequestLayoutState`.
+   creates its Yoga node and produces `RequestLayoutState`. Ordinary view boundaries
+   enter a scoped render phase to create their elements before requesting layout.
 3. **Compute layout:** Yoga resolves the root against the logical viewport size.
    Web defaults are enabled; dimensions use border-box semantics. Yoga rounds
    layout to the configured physical pixel scale.
 4. **Prepaint:** elements receive resolved absolute bounds and mutable request
-   state, prepare hitboxes, and produce `PrepaintState`.
+   state, prepare hitboxes and dispatch nodes, and produce `PrepaintState`. Cached
+   boundaries now know their outer bounds: they either replay retained prepaint
+   output or perform scoped render/layout/prepaint of their contents.
 5. **Paint:** elements receive both states and append ordered primitives to the
    scene. `Div` implements backgrounds, clipping and child traversal.
 6. **Submit:** the backend consumes or copies the scene. On success, the window
-   commits its dependencies and hitboxes; the temporary tree and Yoga nodes are
+   commits dependencies, hitboxes, dispatch tree and cache metadata together; the temporary tree and Yoga nodes are
    destroyed. On failure, previous presentation metadata remains and a retry is
    scheduled by leaving the window dirty.
 
@@ -144,12 +150,24 @@ try counter.update(increment);
 
 ### Scheduling and window dependencies
 
-Each window records the entities read while constructing its successful frame.
-Only a changed/released dependency, explicit invalidation, or resize requires a
-redraw. Each successful render replaces the dependency set, so hidden child
-views stop invalidating their former windows. Multiple windows may depend on
-the same entity independently. An invalidated window rebuilds its full tree;
-subtree caching is a later optimization.
+Each view occurrence records its direct entity reads during render, layout,
+prepaint and paint, including its own entity revision. Each window also retains
+an aggregate dependency set for `needsDraw()` and an entity-to-reader index.
+A changed/released entity dirties every reader and each reader's ancestor views.
+Containment and data dependencies are separate structures:
+
+```text
+Workspace                 containment       Workspace → Editor / Sidebar
+├── Editor → Document     data reads        Editor → Document
+└── Sidebar → Settings                      Sidebar → Settings
+```
+
+Changing `Document` rebuilds the path through `Workspace` and `Editor`; an
+unchanged cached `Sidebar` replays its output. Ordinary views rebuild whenever
+their containing traversal reaches them. Reads remain entity-level, not field-level;
+mutation requires `notify()`. Successful rebuilds replace dependencies, while
+cache hits restore retained dependencies. Removed branches stop invalidating the
+window. Multiple readers, occurrences and windows can depend on the same entity.
 
 The host owns the event loop. Optionally set `app.wakeup` to a context pointer and
 `schedule` function that posts a future UI-loop turn. The host should coalesce
@@ -160,9 +178,116 @@ notifications to an OS API.
 
 `Window.hitTest(point)` returns the last matching stable `Div.id`, using the
 last successfully presented frame's clipped hitboxes. Input routing can use that
-ID to update an entity and emit a typed event. `NativeWindow.on_input` receives
-the portable event and this hit target. Keyboard events go to the window handler;
-hierarchical element bubbling and a framework focus tree remain extension points.
+ID to update an entity and emit a typed event. Native events first pass through
+the committed dispatch tree; `NativeWindow.on_input` receives unhandled events
+and their hit target as a fallback.
+
+### Explicit cached views
+
+```zig
+const editor = try frame.cachedView(editor_entity, .{
+    .style = .{ .grow = 1, .height = .{ .percent = 100 }, .clip = true },
+});
+```
+
+The boundary style participates in parent layout, providing the outer dimensions.
+Its contents are laid out in a detached Yoga container using those resolved
+dimensions, padding and flex rules. Contents do not contribute intrinsic size
+back to the parent; use an ordinary view for content-driven outer sizing.
+
+Reuse requires clean dependency/ancestor state and matching bounds, effective
+clip, viewport, scale and boundary style. `Window.invalidate()` explicitly
+bypasses caches. Resize and focus changes currently conservatively refresh all
+cached views, including views that queried `frame.isFocused(handle)`.
+
+Cached state contains scene ranges, clipped hitboxes, dispatch metadata, direct
+dependencies and descendant cache records. A hit skips subtree render, internal
+layout, prepaint and paint. Replay copies output into the candidate snapshot and
+remaps dispatch IDs and nested ranges; it does not retain temporary elements,
+Yoga pointers or a chain of previous frame arenas. Callback captures are owned
+and reference-counted across replay. The renderer still receives the complete
+ordered scene, including reused primitives.
+
+Identity is the parent view path plus entity ID and instance key. Use
+`frame.keyedView(entity, key)` or `.key` in cached-view options when rendering the
+same entity more than once beneath one parent. Duplicate identities and recursive
+view containment return errors. Moving a view to a different parent establishes
+a new occurrence. Focus handles identify individual focusable nodes, so repeated
+occurrences must not register the same focus handle simultaneously.
+
+`window.inspect()` returns the current committed snapshot: `views` exposes
+parents, direct dependencies, dirty reasons and reuse flags; `readers` maps an
+entity to its readers; `view_nodes` maps an entity to dispatch nodes. `cache_hits`
+and `cache_misses` count visited cached boundaries in that frame. Descendants of
+a fully reused ancestor are marked reused without counting separate lookups.
+Treat this inspection data as read-only and borrow it only until the next
+successful draw or window teardown.
+
+### Focus, input and actions
+
+Create a stable handle with `app.newFocusHandle()`. Register it with `Div.focus`,
+then call `window.focus(handle)` after a successful frame, or `event_context.focus`
+from an input listener. `window.blur()` clears focus. A node removed by a
+successful frame loses focus automatically.
+
+```zig
+const Increment = struct {};
+
+pub fn render(self: *const Counter, f: *ui.Frame, cx: *ui.Context(Counter)) !ui.AnyElement {
+    return f.div(.{
+        .focus = self.focus_handle,
+        .key_context = "Counter",
+        .listeners = &.{try f.entityActionListener(cx.entity, Increment, onIncrement)},
+        .bindings = &.{try f.bindKey("space", .{}, "Counter", Increment{})},
+    });
+}
+
+fn onIncrement(self: *Counter, _: *const Increment, phase: ui.DispatchPhase,
+    cx: *ui.Context(Counter), event: *ui.EventContext) !void
+{
+    if (phase != .bubble) return;
+    self.value += 1;
+    try cx.notify();
+    event.stopPropagation();
+}
+```
+
+- Keyboard, modifiers and text/composition use the focused path, or the root
+  content node when no node has focus. Pointer events use the last matching
+  clipped hitbox's node, or the root content node when nothing is hit. Assign
+  a `Div.id` to create a pointer hit target.
+- Listeners run root-to-target during capture, then target-to-root during bubble,
+  in registration order within each node. `EventContext.handle()` marks an event
+  handled but allows propagation; `stopPropagation()` also stops delivery.
+- Raw input listeners run first. Unhandled key-down events resolve bindings
+  against named contexts on the focused path. The deepest matching context wins;
+  ties prefer the deeper binding owner, then the later registration. An unhandled
+  action allows the next matching binding to be tried. This is a single-keystroke
+  keymap with exact named contexts and modifiers, rather than GPUI's full predicate
+  language and chord/replay machinery.
+- `window.dispatchAction(value)` dispatches a typed action directly. Actions are
+  distinct from `Context.emit()` subscription events.
+- `frame.entityInputListener` and `entityActionListener` retain weak handles and
+  invoke callbacks under the standard entity borrow/update boundary. Released
+  entities are skipped. These callbacks receive mutable entity state, the event
+  or typed action, phase, entity context, and event context.
+- `frame.inputListener(capture, callback)` and `actionListener(Action, capture,
+  callback)` support custom captures. Successful registration transfers the
+  capture by value; an optional `deinit(*Capture)` runs when the final retained
+  reference is released. Reference-containing fields are not deep-cloned and
+  must outlive the capture. Never capture a frame-arena pointer. Descriptors
+  returned by these registration helpers belong to their constructing frame.
+- `Frame.configureNode(...)` gives custom elements the same registration surface
+  during prepaint; built-in `Div` handles this automatically.
+- Dispatch holds the committed tree stable. Reentrant drawing/input returns an
+  error; destroy windows outside callbacks. Listener errors propagate to callers
+  (`NativeWindow.last_error` for native dispatch).
+
+The desktop example has two independently cached sibling views sharing a palette
+entity. Moving the pointer rebuilds the quad view while reusing the sidebar;
+**Space** invokes a focused increment action, **T** changes the shared palette
+and rebuilds both, and **Cmd-Q** quits. The smoke run asserts selective reuse,
+cursor positioning and action updates; normal exit prints render/cache counters.
 
 ### Native macOS integration
 
@@ -176,7 +301,7 @@ const window = try ui.NativeWindow.create(&app, platform, root_entity, .{
     .size = .{ .width = 800, .height = 600 },
 });
 defer window.destroy();
-// Set window.on_input to dispatch input into entity updates.
+// Register listeners in views; optionally set window.on_input for unhandled events.
 platform.run();
 ```
 
@@ -201,9 +326,15 @@ gesture and momentum phases. A handled key suppresses text interpretation.
 Unconsumed typing goes through AppKit `interpretKeyEvents:` and
 `NSTextInputClient`, producing separate committed-text and marked-composition
 events, including replacement ranges. Text slices are valid only during dispatch.
-Install `surface.setTextInputHandler(...)` for a focused text model to supply
+Register `Div.text_input = try frame.textInputHandler(capture, Adapter)` for a focused text model to supply
 selection/marked ranges, surrounding text, character lookup and candidate-window
-bounds. Text-service ranges use UTF-16 offsets. Without a handler, composition
+bounds. The adapter exposes public `selectedRange`, `markedRange`, `textForRange`,
+`boundsForRange` and `characterIndex` methods taking `*Capture`; their remaining
+arguments/results match the portable text-input interface. Use weak entity
+handles for model-backed adapters and check for release on each query. The native
+window installs the focused node's nearest ancestor provider and clears it before
+replacing/destroying its snapshot. Custom platform hosts can still use
+`surface.setTextInputHandler(...)` directly. Text-service ranges use UTF-16 offsets. Without a handler, composition
 events still work, with the candidate window anchored at the content origin.
 
 Window and text callback contexts must outlive their registration. Clear them
@@ -257,7 +388,7 @@ This intentionally simple backend is synchronous rather than a pipelined rendere
   `deinit(self: *T)`, it is called on release. Failed creation leaves value
   ownership with the caller. Pointers returned by `read` must not be retained
   across entity destruction.
-- Event payloads and callback captures are copied **by value**, not deep-cloned.
+- Subscription event payloads and callback captures are copied **by value**, not deep-cloned.
   Referenced buffers must outlive delivery/subscription respectively. The runtime
   frees the boxes, but does not destroy resources referenced by their fields.
 - Element values and both phase states live in the frame arena. Use
@@ -267,11 +398,11 @@ This intentionally simple backend is synchronous rather than a pipelined rendere
   failure. Yoga itself allocates via C++; Zig allocation-failure tests cover the
   Zig-owned portion of the pipeline.
 
-The current scene has no text shaping/rasterization, image resources,
-accessibility, persistent element
-state, focus/actions or subtree caching. Scene primitives currently contain
-clipped solid quads. These are extension points for later phases, rather than
-claims of complete GPUI API compatibility.
+The current scene contains clipped solid quads. Text shaping/rasterization,
+image resources, accessibility and a general-purpose persistent custom-element
+state API remain extension points. Cached view state retains rendered output and
+dispatch/dependency metadata; temporary custom-element phase state is recreated
+on a cache miss. This is a GPUI-inspired foundation, not full API compatibility.
 
 ## Design references
 
@@ -280,12 +411,17 @@ The implementation follows the lifecycle and reactive concepts from:
 - [GPUI Element / Drawable / Render](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/element.rs)
 - [GPUI Context notify / observe / subscribe / emit](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/app/context.rs)
 - [GPUI Subscription lifecycle and delivery semantics](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/subscription.rs)
+- [GPUI cached view state](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/view.rs)
+- [GPUI key dispatch tree](https://github.com/zed-industries/zed/blob/main/crates/gpui/src/key_dispatch.rs)
 - [Ghostty compile-time Renderer selection](https://github.com/ghostty-org/ghostty/blob/main/src/renderer.zig)
 - [Yoga 3.2.1](https://github.com/facebook/yoga/tree/v3.2.1)
 
 The test suite exercises real Yoga geometry, phase ordering/state, typed event
 delivery, cancellation/reentrancy, owner release, borrow protection, dependency
-replacement, clipping, backend substitution/failure, and allocation-failure cleanup.
+replacement, per-view readers and ancestor propagation, nested cache reuse,
+dispatch remapping, focus/actions/text providers, clipping/layout equivalence,
+backend substitution/failure, and allocation-failure cleanup.
 Opt-in native tests additionally create two independent Metal windows, render
 clipped/translucent scenes, resize, dispatch Unicode text/composition and synthetic
-AppKit key events, run the real event loop, and verify independent close/teardown.
+AppKit key events, run the real event loop, verify independent close/teardown, and
+dispatch a native keybinding through a focused listener in a reused cached subtree.

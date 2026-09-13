@@ -132,10 +132,17 @@ pub const App = struct {
     depth: usize = 0,
     flushing: bool = false,
     tracking: ?*std.ArrayList(Dependency) = null,
+    view_tracking: ?struct { context: *anyopaque, record: *const fn (*anyopaque, Dependency) anyerror!void } = null,
+    next_focus: u64 = 1,
     wakeup: ?Wakeup = null,
 
     pub fn init(allocator: Allocator) App {
         return .{ .allocator = allocator };
+    }
+    pub fn newFocusHandle(self: *App) @import("dispatch.zig").FocusHandle {
+        const id = self.next_focus;
+        self.next_focus += 1;
+        return .{ .app = self, .id = id };
     }
     pub fn deinit(self: *App) void {
         for (self.listeners.items) |entry| entry.destroy(self.allocator, entry.capture);
@@ -185,6 +192,7 @@ pub const App = struct {
             if (entry.source == entity.id or entry.owner == entity.id) entry.active = false;
         }
         slot.destroy(self.allocator, slot.value.?);
+        self.schedule();
     }
     pub fn read(self: *App, entity: anytype) !*const @TypeOf(entity).Value {
         try self.validate(entity);
@@ -192,9 +200,11 @@ pub const App = struct {
         return @ptrCast(@alignCast(self.slots.items[entity.id - 1].value.?));
     }
     pub fn track(self: *App, id: EntityId) !void {
+        const dependency = Dependency{ .id = id, .revision = self.revision(id) orelse return error.EntityReleased };
+        if (self.view_tracking) |tracker| try tracker.record(tracker.context, dependency);
         if (self.tracking) |deps| {
             for (deps.items) |dep| if (dep.id == id) return;
-            try deps.append(self.allocator, .{ .id = id, .revision = self.revision(id) orelse return error.EntityReleased });
+            try deps.append(self.allocator, dependency);
         }
     }
     fn borrow(self: *App, entity: anytype) !*@TypeOf(entity).Value {
@@ -211,6 +221,18 @@ pub const App = struct {
         self.depth += 1;
         var cx = Context(@TypeOf(entity).Value){ .app = self, .entity = entity };
         const result: anyerror!void = callback(state, &cx);
+        self.unborrow(entity.id);
+        self.depth -= 1;
+        try self.flush();
+        try result;
+    }
+
+    /// Update with a by-value argument, retaining the normal borrow/effect boundary.
+    pub fn updateWith(self: *App, entity: anytype, argument: anytype, callback: anytype) !void {
+        const state = try self.borrow(entity);
+        self.depth += 1;
+        var cx = Context(@TypeOf(entity).Value){ .app = self, .entity = entity };
+        const result: anyerror!void = callback(state, argument, &cx);
         self.unborrow(entity.id);
         self.depth -= 1;
         try self.flush();

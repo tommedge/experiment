@@ -27,6 +27,7 @@ pub const AnyElement = struct {
             id: layout.LayoutId = undefined,
             request_state: E.RequestLayoutState = undefined,
             prepaint_state: E.PrepaintState = undefined,
+            dispatch_node: ?usize = null,
             fn request(raw: *anyopaque, f: *Frame) !layout.LayoutId {
                 const self: *@This() = @ptrCast(@alignCast(raw));
                 if (self.phase != .start or f.phase != .request_layout) return error.InvalidPhase;
@@ -39,12 +40,19 @@ pub const AnyElement = struct {
             fn prepaint(raw: *anyopaque, f: *Frame) !void {
                 const self: *@This() = @ptrCast(@alignCast(raw));
                 if (self.phase != .layout_requested or f.phase != .prepaint) return error.InvalidPhase;
+                const parent = f.active_node;
+                self.dispatch_node = try f.pushNode();
+                f.active_node = self.dispatch_node;
+                defer f.active_node = parent;
                 self.prepaint_state = try self.value.prepaint(f, f.layout.bounds(self.id), &self.request_state);
                 self.phase = .prepainted;
             }
             fn paint(raw: *anyopaque, f: *Frame) !void {
                 const self: *@This() = @ptrCast(@alignCast(raw));
                 if (self.phase != .prepainted or f.phase != .paint) return error.InvalidPhase;
+                const parent = f.active_node;
+                f.active_node = self.dispatch_node;
+                defer f.active_node = parent;
                 try self.value.paint(f, f.layout.bounds(self.id), &self.request_state, &self.prepaint_state);
                 self.phase = .painted;
             }
@@ -72,8 +80,14 @@ pub const Div = struct {
     children: []const AnyElement = &.{},
     /// Stable application-defined identifier for headless hit testing.
     id: ?u64 = null,
+    focus: ?@import("dispatch.zig").FocusHandle = null,
+    key_context: ?[]const u8 = null,
+    listeners: []const @import("dispatch.zig").Listener = &.{},
+    bindings: []const @import("dispatch.zig").Binding = &.{},
+    text_input: ?@import("dispatch.zig").TextInput = null,
 
     pub fn requestLayout(self: *Div, f: *Frame) !LayoutRequest(void) {
+        if (self.style.hidden) return .{ .id = try f.layout.request(self.style, &.{}), .state = {} };
         const ids = try f.allocator().alloc(layout.LayoutId, self.children.len);
         for (self.children, 0..) |child, i| ids[i] = try child.requestLayout(f);
         return .{ .id = try f.layout.request(self.style, ids), .state = {} };
@@ -82,6 +96,7 @@ pub const Div = struct {
         const old_clip = f.clip;
         defer f.clip = old_clip;
         if (self.style.hidden) return old_clip;
+        try f.configureNode(self.focus, self.key_context, self.listeners, self.bindings, self.text_input);
         if (self.id) |id| try f.hitbox(id, bounds);
         if (self.style.clip) f.clip = bounds.intersect(old_clip);
         for (self.children) |child| try child.prepaint(f);

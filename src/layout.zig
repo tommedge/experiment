@@ -39,6 +39,8 @@ pub const Layout = struct {
     allocator: std.mem.Allocator,
     config: *c.YGConfig,
     nodes: std.ArrayList(LayoutId) = .empty,
+    /// Scoped origin for detached cached-subtree layouts.
+    offset: g.Point = .{},
 
     pub fn init(allocator: std.mem.Allocator, scale: f32) !Layout {
         if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidScale;
@@ -68,8 +70,8 @@ pub const Layout = struct {
         c.YGNodeCalculateLayout(root, size.width, size.height, c.YGDirectionLTR);
     }
 
-    pub fn bounds(_: *const Layout, node: LayoutId) g.Bounds {
-        var origin = g.Point{ .x = c.YGNodeLayoutGetLeft(node), .y = c.YGNodeLayoutGetTop(node) };
+    pub fn bounds(self: *const Layout, node: LayoutId) g.Bounds {
+        var origin = g.Point{ .x = c.YGNodeLayoutGetLeft(node) + self.offset.x, .y = c.YGNodeLayoutGetTop(node) + self.offset.y };
         var parent = c.YGNodeGetOwner(node);
         while (parent) |p| : (parent = c.YGNodeGetOwner(p)) {
             origin.x += c.YGNodeLayoutGetLeft(p);
