@@ -1,0 +1,23 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+     "label": "Debug terminal example",
+     "adapter": "CodeLLDB",
+     "request": "launch",
+     "program": "$ZED_WORKTREE_ROOT/zig-out/bin/terminal",
+     "cwd": "$ZED_WORKTREE_ROOT",
+     "args": [],
+     "build": {
+       "command": "zig",
+       "args": [
+         "build",
+         "-Dterminal=true",
+         "-Doptimize=Debug"
+       ],
+       "cwd": "$ZED_WORKTREE_ROOT"
+     }
+   }
+]
