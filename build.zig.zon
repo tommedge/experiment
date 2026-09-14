@@ -2,6 +2,11 @@
     .name = .zigui,
     .version = "0.1.0",
     .dependencies = .{
+        .ghostty = .{
+            .url = "git+https://github.com/ghostty-org/ghostty#3c1ef5b32fc5ea6b93d28493fabf193f595139cf",
+            .hash = "ghostty-1.3.2-dev-5UdBC4obYwU_lU6iqdM86Iv8elWxMg0TXDTPw5un3lYd",
+            .lazy = true,
+        },
         .zig_objc = .{
             .url = "https://github.com/mitchellh/zig-objc/archive/c8de82ff80281215ad92900866dab7103a8efa8b.tar.gz",
             .hash = "zig_objc-0.0.0-Ir_Sp9gsAQCPAJc0oF5xoWePHWP6Y6tCphDeyNUThJoi",

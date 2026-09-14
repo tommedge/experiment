@@ -36,6 +36,26 @@ counter emitted Changed(2)
 stub presented 2 frames; bar width: 80; idle redraw: false
 ```
 
+## Terminal example
+
+An optional standalone macOS terminal ports the Ghostty VT/PTY approach from
+`../editor` onto the framework's existing platform, entity, custom-element and
+text/scene interfaces:
+
+```sh
+zig build run-terminal -Dterminal=true
+zig build run-terminal -Dterminal=true -- --smoke
+zig build test-terminal -Dterminal=true --summary all
+```
+
+It supports a real interactive shell, ANSI colors, fixed-cell Unicode text,
+scrollback, alternate screens, mode-aware keys/mouse reporting, resize and paste.
+It retains dirty-row drawing data and uses direct/bounded grapheme caches; input
+events trigger redraws only when they change visible state.
+Ghostty is a pinned, lazy dependency enabled only by `-Dterminal=true`. See
+[`examples/terminal/README.md`](examples/terminal/README.md) for controls, custom
+commands, lifecycle details and the example's scope.
+
 ## Architecture
 
 ```text

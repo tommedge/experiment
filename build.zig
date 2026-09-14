@@ -21,6 +21,8 @@ pub fn build(b: *std.Build) void {
     const native_tests = b.option(bool, "native-tests", "Include AppKit/Metal integration tests (opens windows)") orelse false;
     if (native_tests and selected_platform != .macos) @panic("native tests require the macOS platform");
     options.addOption(bool, "native_tests", native_tests);
+    const terminal_example = b.option(bool, "terminal", "Build the optional macOS terminal example and its tests") orelse false;
+    if (terminal_example and selected_platform != .macos) @panic("the terminal example requires -Dplatform=macos on a macOS target");
     const yoga = b.dependency("yoga", .{});
     const native = b.addLibrary(.{
         .name = "yoga",
@@ -69,4 +71,32 @@ pub fn build(b: *std.Build) void {
     }
     const tests = b.addTest(.{ .root_module = mod });
     b.step("test", "Run framework and Yoga integration tests").dependOn(&b.addRunArtifact(tests).step);
+    if (terminal_example) {
+        if (b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize })) |ghostty| {
+            const imports: []const std.Build.Module.Import = &.{
+                std.Build.Module.Import{ .name = "zigui", .module = mod },
+                .{ .name = "ghostty-vt", .module = ghostty.module("ghostty-vt") },
+                .{ .name = "objc", .module = b.dependency("zig_objc", .{ .target = target, .optimize = optimize }).module("objc") },
+            };
+            const terminal = b.addExecutable(.{ .name = "terminal", .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/terminal/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+                .link_libc = true,
+            }) });
+            b.installArtifact(terminal);
+            const run_terminal = b.addRunArtifact(terminal);
+            if (b.args) |args| run_terminal.addArgs(args);
+            b.step("run-terminal", "Run the terminal example (-Dterminal=true)").dependOn(&run_terminal.step);
+            const terminal_tests = b.addTest(.{ .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/terminal/tests.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+                .link_libc = true,
+            }) });
+            b.step("test-terminal", "Test the terminal model and real PTY (-Dterminal=true)").dependOn(&b.addRunArtifact(terminal_tests).step);
+        }
+    }
 }
