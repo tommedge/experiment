@@ -56,6 +56,48 @@ Ghostty is a pinned, lazy dependency enabled only by `-Dterminal=true`. See
 [`examples/terminal/README.md`](examples/terminal/README.md) for controls, custom
 commands, lifecycle details and the example's scope.
 
+## Persistent terminal multiplexer
+
+The networked terminal project is integrated alongside the UI framework:
+
+- `src/multiplexer/`: native Zig server and CLI client, including macOS support.
+- `server/`: independent Rust server and CLI client, Cargo lockfile and tests.
+- `tests/zig_end_to_end.py`: real QUIC/PTY and optional cross-language tests.
+
+The Go implementation is not included. The existing local terminal example is
+unchanged; it is not yet wired to the networked multiplexer.
+
+The Zig implementation requires Zig 0.16.0 and either Linux with libc development
+headers or macOS with Xcode Command Line Tools. Build and test from this directory:
+
+```sh
+zig build -Dmultiplexer=true -Doptimize=ReleaseSafe
+zig build test -Dmultiplexer=true --summary all
+zig build test-multiplexer -Dmultiplexer=true --summary all # multiplexer only
+python3 tests/zig_end_to_end.py
+
+# In separate terminals, using the same working directory:
+zig-out/bin/multiplexer-zig serve
+zig-out/bin/multiplexer-zig new
+zig-out/bin/multiplexer-zig list
+zig-out/bin/multiplexer-zig attach 1
+# Or: zig build run-multiplexer -Dmultiplexer=true -- serve
+```
+
+Multiplexer dependencies are lazy: ordinary framework builds do not fetch QUIC
+or its Ghostty revision. The multiplexer retains its original Ghostty pin,
+separate from the local terminal example's pin, to preserve both APIs.
+
+Both implementations speak protocol v3 and can connect to each other's servers.
+They do not share running PTYs; run servers on separate ports. For Rust build
+instructions, shared CLI behavior, and security limitations, see
+[`server/README.md`](server/README.md). To test both interoperability directions:
+
+```sh
+(cd server && cargo build --locked)
+python3 tests/zig_end_to_end.py --rust server/target/debug/multiplexer
+```
+
 ## Architecture
 
 ```text

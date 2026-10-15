@@ -2,3 +2,7 @@
 zig-out/
 zig-pkg/
 /.idea/
+/.multiplexer/
+/server/target/
+/server/.multiplexer/
+/.amp/portals/

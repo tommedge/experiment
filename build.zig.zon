@@ -7,6 +7,16 @@
             .hash = "ghostty-1.3.2-dev-5UdBC4obYwU_lU6iqdM86Iv8elWxMg0TXDTPw5un3lYd",
             .lazy = true,
         },
+        .multiplexer_ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/3425025e585a3403340d4dc6d65132f42e05e605.tar.gz",
+            .hash = "ghostty-1.3.2-dev-5UdBC9EoeAUT7QOZm7IiUlff9-3wIGXzpMyMOMOHmB_B",
+            .lazy = true,
+        },
+        .quic = .{
+            .url = "https://github.com/endel/quic-zig/archive/c800210b623b61dd4f05eccc15798834560a37f4.tar.gz",
+            .hash = "quic-0.5.0-TPyrNIA5LQCgvcbl3RBEJZ1xq8up8DmCIN6NJ-DzSbrY",
+            .lazy = true,
+        },
         .zig_objc = .{
             .url = "https://github.com/mitchellh/zig-objc/archive/c8de82ff80281215ad92900866dab7103a8efa8b.tar.gz",
             .hash = "zig_objc-0.0.0-Ir_Sp9gsAQCPAJc0oF5xoWePHWP6Y6tCphDeyNUThJoi",
@@ -18,5 +28,5 @@
     },
     .fingerprint = 0x18d03e10be01d396,
     .minimum_zig_version = "0.16.0",
-    .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "README.md" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "tests", "README.md" },
 }
