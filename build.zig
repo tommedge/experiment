@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(terminal);
         const run_terminal = b.addRunArtifact(terminal);
         if (b.args) |args| run_terminal.addArgs(args);
-        b.step("run-terminal", "Run the terminal example (-Dterminal=true)").dependOn(&run_terminal.step);
+        b.step("run-terminal", "Run the terminal example").dependOn(&run_terminal.step);
         const terminal_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("examples/terminal/tests.zig"),
             .target = target,
@@ -94,7 +94,7 @@ pub fn build(b: *std.Build) void {
             .imports = imports,
             .link_libc = true,
         }) });
-        b.step("test-terminal", "Test the terminal model and real PTY (-Dterminal=true)").dependOn(&b.addRunArtifact(terminal_tests).step);
+        b.step("test-terminal", "Test the terminal model and real PTY").dependOn(&b.addRunArtifact(terminal_tests).step);
     }
     if (b.option(bool, "multiplexer", "Build the persistent QUIC terminal server and CLI") orelse false) {
         const quic = b.lazyDependency("quic", .{ .target = target, .optimize = optimize });
